@@ -47,16 +47,20 @@ def step(n: int, total: int, text: str):
 # ── Step 1: Install Python dependencies ──────────────────────────────────────
 
 def ensure_deps():
-    if DEPS_MARKER.exists():
-        return
+    import hashlib
     req_file = BASE_DIR / "requirements.txt"
-    step(1, 3, "Installing Python dependencies (one-time) ...")
+    req_hash = hashlib.sha256(req_file.read_bytes()).hexdigest()[:16]
+
+    if DEPS_MARKER.exists() and DEPS_MARKER.read_text().strip() == req_hash:
+        return
+
+    step(1, 3, "Installing Python dependencies ...")
     subprocess.run(
         [sys.executable, "-m", "pip", "install", "-r", str(req_file),
          "--no-warn-script-location", "--quiet"],
         check=True,
     )
-    DEPS_MARKER.touch()
+    DEPS_MARKER.write_text(req_hash)
     print("      Dependencies ready!")
 
 

@@ -21,6 +21,8 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from llm_clients import make_client
+
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.json"
 STATIC_DIR = BASE_DIR / "static"
@@ -35,6 +37,12 @@ DEFAULT_CONFIG = {
     "host": "0.0.0.0",
     "llama_server_path": "",
     "use_patcher": True,
+    "model_a_provider": "local",
+    "model_a_api_key": "",
+    "model_a_cloud_model": "",
+    "model_b_provider": "local",
+    "model_b_api_key": "",
+    "model_b_cloud_model": "",
 }
 
 
@@ -69,6 +77,10 @@ class State:
     port_b: int = 8081
     log_queue: asyncio.Queue = None
     loop: asyncio.AbstractEventLoop = None
+    provider_a: str = "local"
+    provider_b: str = "local"
+    client_a: Optional[object] = None  # BaseLLMClient
+    client_b: Optional[object] = None  # BaseLLMClient
 
     @classmethod
     def alive(cls, proc) -> bool:
@@ -116,6 +128,8 @@ def stop_all():
     state.proc_a = state.proc_b = None
     state.healthy_a = state.healthy_b = False
     state.vram_a = state.vram_b = False
+    state.client_a = state.client_b = None
+    state.provider_a = state.provider_b = "local"
 
 
 atexit.register(stop_all)
@@ -123,11 +137,24 @@ if platform.system() != "Windows":
     signal.signal(signal.SIGTERM, lambda *_: (stop_all(), sys.exit(0)))
 
 
-async def _health(port_attr: str, flag: str):
+async def _health(flag: str, proc_attr: str, port_attr: str, provider_attr: str, client_attr: str):
     async with httpx.AsyncClient(timeout=3.0) as client:
         while True:
             await asyncio.sleep(4)
-            proc = state.proc_a if flag == "healthy_a" else state.proc_b
+            if getattr(state, provider_attr) != "local":
+                # Cloud provider: ask the client for a health check
+                llm_client = getattr(state, client_attr)
+                if llm_client is not None:
+                    try:
+                        result = await llm_client.health_check()
+                    except Exception:
+                        result = False
+                else:
+                    result = False
+                setattr(state, flag, result)
+                continue
+            # Local provider: check if the subprocess is alive then probe /v1/models
+            proc = getattr(state, proc_attr)
             if not state.alive(proc):
                 setattr(state, flag, False)
                 continue
@@ -162,8 +189,8 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 async def startup():
     state.loop = asyncio.get_event_loop()
     state.log_queue = asyncio.Queue(maxsize=1000)
-    asyncio.create_task(_health("port_a", "healthy_a"))
-    asyncio.create_task(_health("port_b", "healthy_b"))
+    asyncio.create_task(_health("healthy_a", "proc_a", "port_a", "provider_a", "client_a"))
+    asyncio.create_task(_health("healthy_b", "proc_b", "port_b", "provider_b", "client_b"))
     threading.Timer(1.2, lambda: webbrowser.open("http://localhost:7860")).start()
 
 
@@ -173,9 +200,12 @@ async def index():
 
 
 class ModelConfig(BaseModel):
-    path: str
+    path: str = ""
     args: str = ""
     port: int = 8080
+    provider: str = "local"
+    api_key: str = ""
+    cloud_model: str = ""
 
 
 class StartRequest(BaseModel):
@@ -185,47 +215,121 @@ class StartRequest(BaseModel):
     llama_server_path: str = ""
 
 
+def _model_ready(which: str) -> bool:
+    provider = getattr(state, f"provider_{which}")
+    if provider == "local":
+        return state.alive(getattr(state, f"proc_{which}"))
+    return getattr(state, f"client_{which}") is not None
+
+
 @app.post("/api/start")
 async def api_start(req: StartRequest):
-    if state.alive(state.proc_a) or state.alive(state.proc_b):
+    already = (
+        state.alive(state.proc_a) or state.alive(state.proc_b)
+        or state.client_a is not None or state.client_b is not None
+    )
+    if already:
         raise HTTPException(400, "Already running — stop first")
 
     cfg = load_config()
     llama_bin = req.llama_server_path.strip() or cfg.get("llama_server_path") or find_llama_server()
 
-    # Validate files exist before launching anything
-    if not Path(req.model_a.path).exists():
-        raise HTTPException(400, f"Model A not found: {req.model_a.path}")
-    if req.model_b and not Path(req.model_b.path).exists():
-        raise HTTPException(400, f"Model B not found: {req.model_b.path}")
-    if req.model_b and req.model_a.port == req.model_b.port:
+    # Validate model A
+    if req.model_a.provider == "local":
+        if not req.model_a.path or not Path(req.model_a.path).exists():
+            raise HTTPException(400, f"Model A not found: {req.model_a.path}")
+    else:
+        if not req.model_a.api_key.strip():
+            raise HTTPException(400, "Model A: API key is required for cloud providers")
+        if not req.model_a.cloud_model.strip():
+            raise HTTPException(400, "Model A: cloud model ID is required")
+
+    # Validate model B (if present)
+    if req.model_b:
+        if req.model_b.provider == "local":
+            if not req.model_b.path or not Path(req.model_b.path).exists():
+                raise HTTPException(400, f"Model B not found: {req.model_b.path}")
+        else:
+            if not req.model_b.api_key.strip():
+                raise HTTPException(400, "Model B: API key is required for cloud providers")
+            if not req.model_b.cloud_model.strip():
+                raise HTTPException(400, "Model B: cloud model ID is required")
+
+    # Port collision check only between two local models
+    if (
+        req.model_b
+        and req.model_a.provider == "local"
+        and req.model_b.provider == "local"
+        and req.model_a.port == req.model_b.port
+    ):
         raise HTTPException(400, f"Model A and B cannot use the same port ({req.model_a.port})")
 
-    state.port_a = req.model_a.port
     state.vram_a = state.vram_b = False
 
-    proc_a = _launch(req.model_a.path, req.model_a.args, req.host, req.model_a.port, llama_bin)
-    state.proc_a = proc_a
-    threading.Thread(target=_read_stream, args=(proc_a.stdout, "A", "vram_a", [proc_a]), daemon=True).start()
+    # --- Launch Model A ---
+    state.provider_a = req.model_a.provider
+    state.client_a = make_client(
+        req.model_a.provider,
+        port=req.model_a.port,
+        model=req.model_a.cloud_model,
+        api_key=req.model_a.api_key,
+    )
 
+    pid_a = None
+    if req.model_a.provider == "local":
+        state.port_a = req.model_a.port
+        proc_a = _launch(req.model_a.path, req.model_a.args, req.host, req.model_a.port, llama_bin)
+        state.proc_a = proc_a
+        pid_a = proc_a.pid
+        threading.Thread(target=_read_stream, args=(proc_a.stdout, "A", "vram_a", [proc_a]), daemon=True).start()
+    else:
+        state.healthy_a = await state.client_a.health_check()
+        log_msg = f"[A] Connected to {req.model_a.provider} — {req.model_a.cloud_model}"
+        if state.loop and state.log_queue and not state.log_queue.full():
+            await state.log_queue.put(log_msg)
+
+    # --- Launch Model B ---
     pid_b = None
     if req.model_b:
-        state.port_b = req.model_b.port
-        proc_b = _launch(req.model_b.path, req.model_b.args, req.host, req.model_b.port, llama_bin)
-        state.proc_b = proc_b
-        threading.Thread(target=_read_stream, args=(proc_b.stdout, "B", "vram_b", [proc_b]), daemon=True).start()
-        pid_b = proc_b.pid
+        state.provider_b = req.model_b.provider
+        state.client_b = make_client(
+            req.model_b.provider,
+            port=req.model_b.port,
+            model=req.model_b.cloud_model,
+            api_key=req.model_b.api_key,
+        )
+
+        if req.model_b.provider == "local":
+            state.port_b = req.model_b.port
+            proc_b = _launch(req.model_b.path, req.model_b.args, req.host, req.model_b.port, llama_bin)
+            state.proc_b = proc_b
+            pid_b = proc_b.pid
+            threading.Thread(target=_read_stream, args=(proc_b.stdout, "B", "vram_b", [proc_b]), daemon=True).start()
+        else:
+            state.healthy_b = await state.client_b.health_check()
+            log_msg = f"[B] Connected to {req.model_b.provider} — {req.model_b.cloud_model}"
+            if state.loop and state.log_queue and not state.log_queue.full():
+                await state.log_queue.put(log_msg)
 
     cfg.update(
-        model_a_path=req.model_a.path, model_a_args=req.model_a.args, model_a_port=req.model_a.port,
+        model_a_path=req.model_a.path,
+        model_a_args=req.model_a.args,
+        model_a_port=req.model_a.port,
         model_b_path=req.model_b.path if req.model_b else "",
         model_b_args=req.model_b.args if req.model_b else cfg.get("model_b_args", ""),
         model_b_port=req.model_b.port if req.model_b else cfg.get("model_b_port", 8081),
-        host=req.host, llama_server_path=llama_bin,
+        host=req.host,
+        llama_server_path=llama_bin,
+        model_a_provider=req.model_a.provider,
+        model_a_api_key=req.model_a.api_key,
+        model_a_cloud_model=req.model_a.cloud_model,
+        model_b_provider=req.model_b.provider if req.model_b else cfg.get("model_b_provider", "local"),
+        model_b_api_key=req.model_b.api_key if req.model_b else cfg.get("model_b_api_key", ""),
+        model_b_cloud_model=req.model_b.cloud_model if req.model_b else cfg.get("model_b_cloud_model", ""),
     )
     save_config(cfg)
 
-    return {"ok": True, "pid_a": proc_a.pid, "pid_b": pid_b}
+    return {"ok": True, "pid_a": pid_a, "pid_b": pid_b}
 
 
 @app.post("/api/stop")
@@ -236,20 +340,24 @@ async def api_stop():
 
 @app.get("/api/status")
 async def api_status():
+    running_a = state.alive(state.proc_a) if state.provider_a == "local" else state.client_a is not None
+    running_b = state.alive(state.proc_b) if state.provider_b == "local" else state.client_b is not None
     return {
         "a": {
-            "running": state.alive(state.proc_a),
+            "running": running_a,
             "healthy": state.healthy_a,
             "vram_error": state.vram_a,
             "pid": state.proc_a.pid if state.alive(state.proc_a) else None,
             "port": state.port_a,
+            "provider": state.provider_a,
         },
         "b": {
-            "running": state.alive(state.proc_b),
+            "running": running_b,
             "healthy": state.healthy_b,
             "vram_error": state.vram_b,
             "pid": state.proc_b.pid if state.alive(state.proc_b) else None,
             "port": state.port_b,
+            "provider": state.provider_b,
         },
     }
 
@@ -282,43 +390,38 @@ async def api_open_file_dialog(type: str = "model"):
 
 @app.post("/api/chat/main")
 async def chat_main(request: Request):
-    if not state.alive(state.proc_a):
-        raise HTTPException(400, "Main model (A) is not running")
+    if not _model_ready("a"):
+        raise HTTPException(400, "Main model (A) is not running or not configured")
     body = await request.json()
-    body["stream"] = True
-    port = state.port_a
 
     async def event_stream():
-        async with httpx.AsyncClient(timeout=None) as client:
-            try:
-                async with client.stream(
-                    "POST",
-                    f"http://127.0.0.1:{port}/v1/chat/completions",
-                    json=body,
-                ) as response:
-                    async for chunk in response.aiter_raw():
-                        yield chunk
-            except Exception as e:
-                yield f"data: {{\"error\": \"{str(e)}\"}}\n\n".encode()
+        try:
+            async for chunk in state.client_a.chat_stream(
+                messages=body.get("messages", []),
+                temperature=body.get("temperature", 0.7),
+                max_tokens=body.get("max_tokens", 4096),
+            ):
+                yield chunk
+        except Exception as e:
+            yield f'data: {{"error": "{str(e)}"}}\n\n'.encode()
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
 
 @app.post("/api/chat/patcher")
 async def chat_patcher(request: Request):
-    if not state.alive(state.proc_b):
+    if not _model_ready("b"):
         raise HTTPException(400, "Patcher model (B) is not running — start it first")
     body = await request.json()
-    body["stream"] = False
-    async with httpx.AsyncClient(timeout=120.0) as client:
-        try:
-            r = await client.post(
-                f"http://127.0.0.1:{state.port_b}/v1/chat/completions",
-                json=body,
-            )
-            return r.json()
-        except Exception as e:
-            raise HTTPException(500, f"Patcher request failed: {e}")
+    try:
+        result = await state.client_b.chat_complete(
+            messages=body.get("messages", []),
+            temperature=body.get("temperature", 0.1),
+            max_tokens=body.get("max_tokens", 1024),
+        )
+        return result
+    except Exception as e:
+        raise HTTPException(500, f"Patcher request failed: {e}")
 
 
 @app.websocket("/ws/logs")

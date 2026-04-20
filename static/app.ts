@@ -5,7 +5,7 @@ declare const marked: { parse(md: string): string };
 declare const DOMPurify: { sanitize(html: string): string };
 
 // ===== Types =====
-interface ModelStatus { running: boolean; healthy: boolean; vram_error: boolean; pid: number | null; port: number; }
+interface ModelStatus { running: boolean; healthy: boolean; vram_error: boolean; pid: number | null; port: number; provider: string; }
 interface StatusResponse { a: ModelStatus; b: ModelStatus; }
 
 interface EnvProfile {
@@ -44,7 +44,51 @@ const chatABtn   = $<HTMLButtonElement>("chatA");
 const chatBBtn   = $<HTMLButtonElement>("chatB");
 const consoleDiv = $<HTMLDivElement>("console");
 
-const LAUNCHER_KEYS = ["pathA","argsA","portA","pathB","argsB","portB","llamaPath","host","usePatcher"] as const;
+// Cloud / provider elements — Model A
+const providerA         = $<HTMLSelectElement>("providerA");
+const localFieldsA      = $<HTMLDivElement>("localFieldsA");
+const cloudFieldsA      = $<HTMLDivElement>("cloudFieldsA");
+const cloudModelSelectA = $<HTMLSelectElement>("cloudModelSelectA");
+const customModelFieldA = $<HTMLDivElement>("customModelFieldA");
+const customModelA      = $<HTMLInputElement>("customModelA");
+const apiKeyA           = $<HTMLInputElement>("apiKeyA");
+
+// Cloud / provider elements — Model B
+const providerB         = $<HTMLSelectElement>("providerB");
+const localFieldsB      = $<HTMLDivElement>("localFieldsB");
+const cloudFieldsB      = $<HTMLDivElement>("cloudFieldsB");
+const cloudModelSelectB = $<HTMLSelectElement>("cloudModelSelectB");
+const customModelFieldB = $<HTMLDivElement>("customModelFieldB");
+const customModelB      = $<HTMLInputElement>("customModelB");
+const apiKeyB           = $<HTMLInputElement>("apiKeyB");
+
+const CLOUD_MODELS: Record<string, {value: string; label: string}[]> = {
+  openai: [
+    {value: "gpt-4o",      label: "GPT-4o"},
+    {value: "gpt-4o-mini", label: "GPT-4o mini"},
+    {value: "o3",          label: "o3"},
+    {value: "o4-mini",     label: "o4-mini"},
+    {value: "__custom__",  label: "Custom model ID…"},
+  ],
+  anthropic: [
+    {value: "claude-opus-4-7",           label: "Claude Opus 4.7"},
+    {value: "claude-sonnet-4-6",         label: "Claude Sonnet 4.6"},
+    {value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5"},
+    {value: "__custom__",                label: "Custom model ID…"},
+  ],
+  groq: [
+    {value: "llama-3.3-70b-versatile",   label: "Llama 3.3 70B"},
+    {value: "llama-3.1-8b-instant",      label: "Llama 3.1 8B (fast)"},
+    {value: "mixtral-8x7b-32768",        label: "Mixtral 8x7B"},
+    {value: "__custom__",                label: "Custom model ID…"},
+  ],
+};
+
+const LAUNCHER_KEYS = [
+  "pathA","argsA","portA","pathB","argsB","portB","llamaPath","host","usePatcher",
+  "providerA","cloudModelSelectA","customModelA","apiKeyA",
+  "providerB","cloudModelSelectB","customModelB","apiKeyB",
+] as const;
 
 function saveLauncherSettings(): void {
   LAUNCHER_KEYS.forEach(k => {
@@ -73,6 +117,15 @@ async function loadConfigFallback(): Promise<void> {
     if (c.llama_server_path) llamaPath.value = c.llama_server_path;
     if (c.host)              hostInput.value = c.host;
     if (c.use_patcher !== undefined) usePatcher.checked = c.use_patcher;
+    if (c.model_a_provider)    providerA.value          = c.model_a_provider;
+    if (c.model_a_api_key)     apiKeyA.value            = c.model_a_api_key;
+    if (c.model_a_cloud_model) customModelA.value       = c.model_a_cloud_model;
+    if (c.model_b_provider)    providerB.value          = c.model_b_provider;
+    if (c.model_b_api_key)     apiKeyB.value            = c.model_b_api_key;
+    if (c.model_b_cloud_model) customModelB.value       = c.model_b_cloud_model;
+    // Re-run provider UI after loading config
+    handleProviderChange("A");
+    handleProviderChange("B");
   } catch (_) {}
 }
 
@@ -90,8 +143,13 @@ let lastStatus: StatusResponse | null = null;
 
 function applyStatus(s: ModelStatus, dot: HTMLSpanElement, label: HTMLDivElement, chatBtn: HTMLButtonElement): void {
   dot.className = "dot " + (!s.running ? "dot-gray" : s.vram_error ? "dot-red" : s.healthy ? "dot-green" : "dot-yellow");
-  label.textContent = !s.running ? "Stopped" : s.vram_error ? "VRAM Error" : s.healthy ? `Running (pid ${s.pid})` : "Starting…";
-  chatBtn.style.display = (s.running && s.healthy) ? "block" : "none";
+  label.textContent = !s.running
+    ? "Stopped"
+    : s.vram_error ? "VRAM Error"
+    : s.healthy
+      ? (s.provider === "local" ? `Running (pid ${s.pid})` : `Ready (${s.provider})`)
+      : "Starting…";
+  chatBtn.style.display = (s.running && s.healthy && s.provider === "local") ? "block" : "none";
 }
 
 async function pollStatus(): Promise<void> {
@@ -134,19 +192,78 @@ $("browseBin").addEventListener("click", () => browseFile("binary", llamaPath,"l
 chatABtn.addEventListener("click", () => window.open(`http://localhost:${portA.value}`, "_blank"));
 chatBBtn.addEventListener("click", () => window.open(`http://localhost:${portB.value}`, "_blank"));
 
+// ===== Provider UI helpers =====
+function populateCloudModels(select: HTMLSelectElement, provider: string): void {
+  select.innerHTML = "";
+  const models = CLOUD_MODELS[provider] || [{value: "__custom__", label: "Custom model ID…"}];
+  models.forEach(m => {
+    const opt = document.createElement("option");
+    opt.value = m.value; opt.textContent = m.label;
+    select.appendChild(opt);
+  });
+}
+
+function handleProviderChange(which: "A" | "B"): void {
+  const provider    = which === "A" ? providerA    : providerB;
+  const localFields = which === "A" ? localFieldsA : localFieldsB;
+  const cloudFields = which === "A" ? cloudFieldsA : cloudFieldsB;
+  const modelSel    = which === "A" ? cloudModelSelectA : cloudModelSelectB;
+  const customField = which === "A" ? customModelFieldA : customModelFieldB;
+
+  const isLocal = provider.value === "local";
+  localFields.style.display = isLocal ? "" : "none";
+  cloudFields.style.display = isLocal ? "none" : "";
+
+  if (!isLocal) {
+    populateCloudModels(modelSel, provider.value);
+    customField.style.display = modelSel.value === "__custom__" ? "" : "none";
+  }
+  saveLauncherSettings();
+}
+
+providerA.addEventListener("change", () => handleProviderChange("A"));
+providerB.addEventListener("change", () => handleProviderChange("B"));
+cloudModelSelectA.addEventListener("change", () => {
+  customModelFieldA.style.display = cloudModelSelectA.value === "__custom__" ? "" : "none";
+  saveLauncherSettings();
+});
+cloudModelSelectB.addEventListener("change", () => {
+  customModelFieldB.style.display = cloudModelSelectB.value === "__custom__" ? "" : "none";
+  saveLauncherSettings();
+});
+
 startBtn.addEventListener("click", async () => {
-  if (!pathA.value.trim()) { addLog("Select Model A first", "log-error"); return; }
+  const isLocalA = providerA.value === "local";
+  if (isLocalA && !pathA.value.trim()) { addLog("Select Model A path first", "log-error"); return; }
+  if (!isLocalA && !apiKeyA.value.trim()) { addLog("Enter API key for Model A", "log-error"); return; }
   saveLauncherSettings();
   startBtn.disabled = true;
   addLog("Starting…", "log-info");
 
+  const cloudModelA = cloudModelSelectA.value === "__custom__" ? customModelA.value.trim() : cloudModelSelectA.value;
+  const cloudModelB = cloudModelSelectB.value === "__custom__" ? customModelB.value.trim() : cloudModelSelectB.value;
+
   const body: Record<string, unknown> = {
-    model_a: { path: pathA.value.trim(), args: argsA.value.trim(), port: Number(portA.value) },
+    model_a: {
+      path: pathA.value.trim(),
+      args: argsA.value.trim(),
+      port: Number(portA.value),
+      provider: providerA.value,
+      api_key: apiKeyA.value.trim(),
+      cloud_model: cloudModelA,
+    },
     host: hostInput.value.trim(),
     llama_server_path: llamaPath.value.trim(),
   };
-  if (usePatcher.checked && pathB.value.trim()) {
-    body.model_b = { path: pathB.value.trim(), args: argsB.value.trim(), port: Number(portB.value) };
+  if (usePatcher.checked && (pathB.value.trim() || providerB.value !== "local")) {
+    body.model_b = {
+      path: pathB.value.trim(),
+      args: argsB.value.trim(),
+      port: Number(portB.value),
+      provider: providerB.value,
+      api_key: apiKeyB.value.trim(),
+      cloud_model: cloudModelB,
+    };
   }
   try {
     const r = await fetch("/api/start", {
@@ -156,7 +273,8 @@ startBtn.addEventListener("click", async () => {
     const data = await r.json();
     if (!r.ok) { addLog("Error: " + (data.detail || "unknown"), "log-error"); startBtn.disabled = false; }
     else {
-      addLog(`Model A started (pid ${data.pid_a})`, "log-a");
+      if (data.pid_a) addLog(`Model A started (pid ${data.pid_a})`, "log-a");
+      else addLog("Model A connected (cloud)", "log-a");
       if (data.pid_b) addLog(`Model B started (pid ${data.pid_b})`, "log-b");
       connectWs();
     }
@@ -682,3 +800,5 @@ loadHistory();
 connectWs();
 pollStatus();
 setInterval(pollStatus, 3000);
+handleProviderChange("A");
+handleProviderChange("B");
