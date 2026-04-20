@@ -8,6 +8,7 @@ import json
 import subprocess
 import sys
 import time
+import urllib.error
 import urllib.request
 import webbrowser
 import zipfile
@@ -21,6 +22,16 @@ DEPS_MARKER = PYTHON_DIR / ".deps_installed"
 
 APP_PORT = 7860
 APP_URL = f"http://localhost:{APP_PORT}"
+
+# Pinned llama.cpp release — update this tag + URL together when upgrading.
+# CPU build works on every machine; CUDA builds are in the same release if needed:
+#   llama-b8855-bin-win-cuda-cu12.4-x64.zip  (requires CUDA 12.4 runtime)
+LLAMA_TAG = "b8855"
+LLAMA_ZIP_NAME = f"llama-{LLAMA_TAG}-bin-win-cpu-x64.zip"
+LLAMA_DOWNLOAD_URL = (
+    f"https://github.com/ggml-org/llama.cpp/releases/download"
+    f"/{LLAMA_TAG}/{LLAMA_ZIP_NAME}"
+)
 
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
@@ -51,64 +62,67 @@ def ensure_deps():
 
 # ── Step 2: Download llama-server.exe ────────────────────────────────────────
 
+def _download_with_progress(url: str, dest: Path):
+    """Download url → dest, printing a simple progress indicator."""
+    try:
+        req = urllib.request.Request(url, headers={"User-Agent": "token-saving-replay-agent"})
+        with urllib.request.urlopen(req, timeout=60) as resp:
+            total = int(resp.headers.get("Content-Length", 0))
+            downloaded = 0
+            chunk = 1024 * 64  # 64 KB
+            with open(dest, "wb") as f:
+                while True:
+                    block = resp.read(chunk)
+                    if not block:
+                        break
+                    f.write(block)
+                    downloaded += len(block)
+                    if total:
+                        pct = downloaded * 100 // total
+                        print(f"\r      {pct:3d}%  ({downloaded // 1024 // 1024} MB / {total // 1024 // 1024} MB) ", end="", flush=True)
+        print()  # newline after progress
+    except urllib.error.URLError as e:
+        dest.unlink(missing_ok=True)
+        raise RuntimeError(
+            f"Download failed: {e}\n\n"
+            "  No internet access or the URL is unreachable.\n"
+            "  Manual fix:\n"
+            f"    1. Download: {LLAMA_DOWNLOAD_URL}\n"
+            "    2. Extract llama-server.exe from the zip.\n"
+            "    3. Place it in:  .\\bin\\llama-server.exe\n"
+            "    4. Re-run start.bat."
+        ) from e
+
+
 def ensure_llama_server() -> str:
     exe = BIN_DIR / "llama-server.exe"
     if exe.exists():
         return str(exe)
 
     BIN_DIR.mkdir(exist_ok=True)
-    step(2, 3, "Fetching latest llama.cpp release from GitHub ...")
+    step(2, 3, f"Downloading llama-server ({LLAMA_TAG}) — this happens only once ...")
+    print(f"      URL: {LLAMA_DOWNLOAD_URL}")
 
-    api_url = "https://api.github.com/repos/ggml-org/llama.cpp/releases/latest"
-    req = urllib.request.Request(api_url, headers={"User-Agent": "token-saving-replay-agent"})
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read())
+    zip_path = BIN_DIR / LLAMA_ZIP_NAME
+    _download_with_progress(LLAMA_DOWNLOAD_URL, zip_path)
 
-    assets = data.get("assets", [])
-
-    def _score(name: str) -> int:
-        n = name.lower()
-        if not ("win" in n and "x64" in n and n.endswith(".zip")):
-            return -1
-        # Prefer builds from best to most compatible
-        if "vulkan" in n:  return 4
-        if "avx2"   in n:  return 3
-        if "avx512" in n:  return 2
-        if "avx"    in n:  return 1
-        return 0
-
-    candidates = [((_score(a["name"]), a)) for a in assets]
-    candidates = [(s, a) for s, a in candidates if s > 0]
-    if not candidates:
-        raise RuntimeError(
-            "Could not find a Windows llama.cpp build on GitHub.\n"
-            "Download llama-server.exe manually and place it in ./bin/"
-        )
-
-    _, best = max(candidates, key=lambda x: x[0])
-    print(f"      Downloading {best['name']} ...")
-
-    zip_path = BIN_DIR / best["name"]
-    urllib.request.urlretrieve(best["browser_download_url"], str(zip_path))
-
-    print("      Extracting files to ./bin/ ...")
+    print("      Extracting llama-server.exe ...")
     with zipfile.ZipFile(zip_path) as z:
         for member in z.namelist():
-            # Flatten directory structure: extract everything to BIN_DIR
-            filename = Path(member).name
-            if not filename:
-                continue
-            target = BIN_DIR / filename
-            target.write_bytes(z.read(member))
+            if Path(member).name == "llama-server.exe":
+                target = BIN_DIR / "llama-server.exe"
+                target.write_bytes(z.read(member))
+                break
+        else:
+            zip_path.unlink(missing_ok=True)
+            raise RuntimeError(
+                "llama-server.exe was not found inside the downloaded zip.\n"
+                f"  Archive: {zip_path.name}\n"
+                "  Try downloading a different build from the releases page and\n"
+                "  placing llama-server.exe in .\\bin\\ manually."
+            )
 
-    zip_path.unlink()
-
-    if not exe.exists():
-        raise RuntimeError(
-            "Extraction finished but llama-server.exe was not found in the archive.\n"
-            "Please place it manually in ./bin/llama-server.exe"
-        )
-
+    zip_path.unlink(missing_ok=True)
     print(f"      Saved to {exe}")
     return str(exe)
 

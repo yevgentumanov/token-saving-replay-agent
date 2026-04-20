@@ -12,11 +12,12 @@ echo.
 
 set "PYDIR=%~dp0python"
 set "PYEXE=%PYDIR%\python.exe"
+set "PY_READY=%PYDIR%\.setup_complete"
 set "PY_VER=3.12.10"
 set "PY_URL=https://www.python.org/ftp/python/%PY_VER%/python-%PY_VER%-embed-amd64.zip"
 
 :: ── Already installed — skip to launch ──────────────────────────────────────
-if exist "%PYEXE%" goto :launch
+if exist "%PY_READY%" goto :launch
 
 :: ── First run: Download portable Python ─────────────────────────────────────
 echo [1/3] Downloading portable Python %PY_VER% ...
@@ -32,25 +33,20 @@ if errorlevel 1 (
     pause & exit /b 1
 )
 
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Expand-Archive -Path '%PYDIR%\py.zip' -DestinationPath '%PYDIR%' -Force; ^
-     Remove-Item '%PYDIR%\py.zip' -ErrorAction SilentlyContinue"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Expand-Archive -Path '%PYDIR%\py.zip' -DestinationPath '%PYDIR%' -Force"
 if errorlevel 1 (
     echo.
     echo  ERROR: Extraction failed.
     pause & exit /b 1
 )
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Remove-Item '%PYDIR%\py.zip' -ErrorAction SilentlyContinue"
 
 :: Enable site-packages so pip can install packages
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "$f = '%PYDIR%\python312._pth'; ^
-     (Get-Content $f) -replace '#import site', 'import site' | Set-Content $f"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "$f = '%PYDIR%\python312._pth'; (Get-Content $f) -replace '#import site', 'import site' | Set-Content $f"
 
 :: Bootstrap pip
 echo [2/3] Bootstrapping pip ...
-powershell -NoProfile -ExecutionPolicy Bypass -Command ^
-    "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' ^
-     -OutFile '%PYDIR%\get-pip.py' -UseBasicParsing"
+powershell -NoProfile -ExecutionPolicy Bypass -Command "Invoke-WebRequest -Uri 'https://bootstrap.pypa.io/get-pip.py' -OutFile '%PYDIR%\get-pip.py' -UseBasicParsing"
 if errorlevel 1 (
     echo.
     echo  ERROR: Could not download pip.
@@ -66,6 +62,7 @@ if errorlevel 1 (
 
 echo [3/3] Python ready!
 echo.
+echo. > "%PY_READY%"
 
 :launch
 :: ── Delegate all remaining setup + launch to portable_launcher.py ────────────
