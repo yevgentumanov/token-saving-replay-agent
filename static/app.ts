@@ -1,0 +1,684 @@
+// app.ts — Compile: npx tsc --target ES2020 --lib ES2020,DOM --strict --outDir . app.ts
+
+// External globals from CDN
+declare const marked: { parse(md: string): string };
+declare const DOMPurify: { sanitize(html: string): string };
+
+// ===== Types =====
+interface ModelStatus { running: boolean; healthy: boolean; vram_error: boolean; pid: number | null; port: number; }
+interface StatusResponse { a: ModelStatus; b: ModelStatus; }
+
+interface EnvProfile {
+  shell: string; os: string;
+  python_version: string; package_manager: string;
+  naming_convention: string; custom_rules: string;
+}
+
+interface ChatMessage { role: "user" | "assistant" | "system"; content: string; }
+
+// ===== Helpers =====
+const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
+
+// ========================================================================
+// ============ LAUNCHER TAB (preserved from Phase 1) =====================
+// ========================================================================
+const pathA      = $<HTMLInputElement>("pathA");
+const argsA      = $<HTMLInputElement>("argsA");
+const portA      = $<HTMLInputElement>("portA");
+const pathB      = $<HTMLInputElement>("pathB");
+const argsB      = $<HTMLInputElement>("argsB");
+const portB      = $<HTMLInputElement>("portB");
+const llamaPath  = $<HTMLInputElement>("llamaPath");
+const hostInput  = $<HTMLInputElement>("host");
+const usePatcher = $<HTMLInputElement>("usePatcher");
+
+const dotA       = $<HTMLSpanElement>("dotA");
+const dotB       = $<HTMLSpanElement>("dotB");
+const statusA    = $<HTMLDivElement>("statusA");
+const statusB    = $<HTMLDivElement>("statusB");
+const blockB     = $<HTMLDivElement>("blockB");
+
+const startBtn   = $<HTMLButtonElement>("startBtn");
+const stopBtn    = $<HTMLButtonElement>("stopBtn");
+const chatABtn   = $<HTMLButtonElement>("chatA");
+const chatBBtn   = $<HTMLButtonElement>("chatB");
+const consoleDiv = $<HTMLDivElement>("console");
+
+const LAUNCHER_KEYS = ["pathA","argsA","portA","pathB","argsB","portB","llamaPath","host","usePatcher"] as const;
+
+function saveLauncherSettings(): void {
+  LAUNCHER_KEYS.forEach(k => {
+    const el = $(k) as HTMLInputElement;
+    localStorage.setItem(k, el.type === "checkbox" ? String(el.checked) : el.value);
+  });
+}
+function loadLauncherSettings(): void {
+  LAUNCHER_KEYS.forEach(k => {
+    const v = localStorage.getItem(k); if (v === null) return;
+    const el = $(k) as HTMLInputElement;
+    if (el.type === "checkbox") el.checked = v === "true"; else el.value = v;
+  });
+}
+async function loadConfigFallback(): Promise<void> {
+  if (pathA.value) return;
+  try {
+    const r = await fetch("/api/config"); if (!r.ok) return;
+    const c = await r.json();
+    if (c.model_a_path)      pathA.value     = c.model_a_path;
+    if (c.model_a_args)      argsA.value     = c.model_a_args;
+    if (c.model_a_port)      portA.value     = String(c.model_a_port);
+    if (c.model_b_path)      pathB.value     = c.model_b_path;
+    if (c.model_b_args)      argsB.value     = c.model_b_args;
+    if (c.model_b_port)      portB.value     = String(c.model_b_port);
+    if (c.llama_server_path) llamaPath.value = c.llama_server_path;
+    if (c.host)              hostInput.value = c.host;
+    if (c.use_patcher !== undefined) usePatcher.checked = c.use_patcher;
+  } catch (_) {}
+}
+
+function addLog(text: string, cls = ""): void {
+  const div = document.createElement("div");
+  div.className = "log-entry" + (cls ? " " + cls : "");
+  const ts = new Date().toLocaleTimeString();
+  div.textContent = `[${ts}] ${text}`;
+  consoleDiv.appendChild(div);
+  if (consoleDiv.children.length > 600) consoleDiv.removeChild(consoleDiv.firstChild!);
+  consoleDiv.scrollTop = consoleDiv.scrollHeight;
+}
+
+let lastStatus: StatusResponse | null = null;
+
+function applyStatus(s: ModelStatus, dot: HTMLSpanElement, label: HTMLDivElement, chatBtn: HTMLButtonElement): void {
+  dot.className = "dot " + (!s.running ? "dot-gray" : s.vram_error ? "dot-red" : s.healthy ? "dot-green" : "dot-yellow");
+  label.textContent = !s.running ? "Stopped" : s.vram_error ? "VRAM Error" : s.healthy ? `Running (pid ${s.pid})` : "Starting…";
+  chatBtn.style.display = (s.running && s.healthy) ? "block" : "none";
+}
+
+async function pollStatus(): Promise<void> {
+  try {
+    const r = await fetch("/api/status"); if (!r.ok) return;
+    const s: StatusResponse = await r.json();
+    lastStatus = s;
+
+    const anyRunning = s.a.running || s.b.running;
+    startBtn.disabled = anyRunning;
+    stopBtn.style.display = anyRunning ? "block" : "none";
+
+    applyStatus(s.a, dotA, statusA, chatABtn);
+    if (usePatcher.checked) {
+      applyStatus(s.b, dotB, statusB, chatBBtn);
+      if (!s.b.running && s.a.running) statusB.textContent = "Not started";
+    }
+    updateChatTabDot(s);
+  } catch (_) {}
+}
+
+function syncPatcherBlock(): void {
+  blockB.classList.toggle("disabled", !usePatcher.checked);
+  statusB.textContent = usePatcher.checked ? "Stopped" : "Disabled";
+  dotB.className = "dot dot-gray";
+}
+usePatcher.addEventListener("change", () => { syncPatcherBlock(); saveLauncherSettings(); });
+
+async function browseFile(type: string, target: HTMLInputElement, logMsg: string): Promise<void> {
+  try {
+    const r = await fetch(`/api/open-file-dialog?type=${type}`);
+    const data = await r.json();
+    if (data.path) { target.value = data.path; saveLauncherSettings(); addLog(logMsg + data.path, "log-info"); }
+  } catch (e) { addLog("File dialog failed: " + e, "log-error"); }
+}
+$("browseA").addEventListener("click",   () => browseFile("model",  pathA,    "Model A: "));
+$("browseB").addEventListener("click",   () => browseFile("model",  pathB,    "Model B: "));
+$("browseBin").addEventListener("click", () => browseFile("binary", llamaPath,"llama-server: "));
+
+chatABtn.addEventListener("click", () => window.open(`http://localhost:${portA.value}`, "_blank"));
+chatBBtn.addEventListener("click", () => window.open(`http://localhost:${portB.value}`, "_blank"));
+
+startBtn.addEventListener("click", async () => {
+  if (!pathA.value.trim()) { addLog("Select Model A first", "log-error"); return; }
+  saveLauncherSettings();
+  startBtn.disabled = true;
+  addLog("Starting…", "log-info");
+
+  const body: Record<string, unknown> = {
+    model_a: { path: pathA.value.trim(), args: argsA.value.trim(), port: Number(portA.value) },
+    host: hostInput.value.trim(),
+    llama_server_path: llamaPath.value.trim(),
+  };
+  if (usePatcher.checked && pathB.value.trim()) {
+    body.model_b = { path: pathB.value.trim(), args: argsB.value.trim(), port: Number(portB.value) };
+  }
+  try {
+    const r = await fetch("/api/start", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const data = await r.json();
+    if (!r.ok) { addLog("Error: " + (data.detail || "unknown"), "log-error"); startBtn.disabled = false; }
+    else {
+      addLog(`Model A started (pid ${data.pid_a})`, "log-a");
+      if (data.pid_b) addLog(`Model B started (pid ${data.pid_b})`, "log-b");
+      connectWs();
+    }
+  } catch (e) { addLog("Request failed: " + e, "log-error"); startBtn.disabled = false; }
+});
+
+stopBtn.addEventListener("click", async () => {
+  addLog("Stopping all…", "log-info");
+  try { await fetch("/api/stop", { method: "POST" }); addLog("Stopped", "log-info"); ws?.close(); ws = null; }
+  catch (e) { addLog("Stop failed: " + e, "log-error"); }
+});
+
+let ws: WebSocket | null = null;
+function connectWs(): void {
+  if (ws) return;
+  ws = new WebSocket(`ws://${location.host}/ws/logs`);
+  ws.onmessage = (e) => {
+    if (e.data === "\x00") return;
+    const cls = e.data.startsWith("[A]") ? "log-a" : e.data.startsWith("[B]") ? "log-b" : "";
+    addLog(e.data, cls);
+  };
+  ws.onclose = () => { ws = null; setTimeout(connectWs, 3000); };
+}
+
+// ========================================================================
+// ==================== TAB SWITCHING =====================================
+// ========================================================================
+document.querySelectorAll<HTMLButtonElement>(".tab-btn").forEach(btn => {
+  btn.addEventListener("click", () => {
+    const tab = btn.dataset.tab!;
+    document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b === btn));
+    document.querySelectorAll(".tab-panel").forEach(p => p.classList.toggle("active", p.id === `panel-${tab}`));
+    if (tab === "chat") checkChatReadiness();
+  });
+});
+
+const tabDotChat = $<HTMLSpanElement>("tabDotChat");
+function updateChatTabDot(s: StatusResponse): void {
+  tabDotChat.classList.toggle("green", s.a.running && s.a.healthy);
+}
+
+// ========================================================================
+// ==================== ENVIRONMENT PROFILE ===============================
+// ========================================================================
+const PROFILE_KEY = "envProfile";
+
+function loadProfile(): EnvProfile {
+  const raw = localStorage.getItem(PROFILE_KEY);
+  const def: EnvProfile = {
+    shell: "powershell", os: "Windows",
+    python_version: "", package_manager: "uv",
+    naming_convention: "", custom_rules: "",
+  };
+  if (!raw) return def;
+  try { return { ...def, ...JSON.parse(raw) }; } catch { return def; }
+}
+
+function saveProfile(): void {
+  const p: EnvProfile = {
+    shell:              ($<HTMLSelectElement>("prof-shell")).value,
+    os:                 ($<HTMLSelectElement>("prof-os")).value,
+    python_version:     ($<HTMLInputElement>("prof-python")).value.trim(),
+    package_manager:    ($<HTMLSelectElement>("prof-pkg")).value,
+    naming_convention:  ($<HTMLInputElement>("prof-naming")).value.trim(),
+    custom_rules:       ($<HTMLTextAreaElement>("prof-rules")).value.trim(),
+  };
+  localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
+  const saved = $<HTMLSpanElement>("profileSaved");
+  saved.classList.add("show");
+  setTimeout(() => saved.classList.remove("show"), 1500);
+}
+
+function hydrateProfileForm(): void {
+  const p = loadProfile();
+  ($<HTMLSelectElement>("prof-shell")).value = p.shell;
+  ($<HTMLSelectElement>("prof-os")).value = p.os;
+  ($<HTMLInputElement>("prof-python")).value = p.python_version;
+  ($<HTMLSelectElement>("prof-pkg")).value = p.package_manager;
+  ($<HTMLInputElement>("prof-naming")).value = p.naming_convention;
+  ($<HTMLTextAreaElement>("prof-rules")).value = p.custom_rules;
+}
+
+$<HTMLButtonElement>("profileSave").addEventListener("click", saveProfile);
+["prof-shell","prof-os","prof-python","prof-pkg","prof-naming","prof-rules"].forEach(id => {
+  $(id).addEventListener("change", saveProfile);
+});
+
+function profileToSystemPrompt(p: EnvProfile): string {
+  const parts: string[] = [
+    `You are assisting a user with the following environment:`,
+    `- Shell: ${p.shell}`,
+    `- OS: ${p.os}`,
+  ];
+  if (p.python_version)    parts.push(`- Python: ${p.python_version}`);
+  if (p.package_manager)   parts.push(`- Package manager: ${p.package_manager}`);
+  if (p.naming_convention) parts.push(`- Naming: ${p.naming_convention}`);
+  if (p.custom_rules) {
+    parts.push(`\nUser rules (follow strictly):`);
+    p.custom_rules.split("\n").map(s => s.trim()).filter(Boolean).forEach(r => parts.push(`- ${r}`));
+  }
+  parts.push(`\nAlways produce commands for the shell above. Prefer tagged code fences (\`\`\`${p.shell}).`);
+  return parts.join("\n");
+}
+
+// ========================================================================
+// ==================== CHAT ==============================================
+// ========================================================================
+const chatMessages = $<HTMLDivElement>("chatMessages");
+const chatInput    = $<HTMLTextAreaElement>("chatInput");
+const chatSend     = $<HTMLButtonElement>("chatSend");
+const chatClear    = $<HTMLButtonElement>("chatClear");
+const chatBanner   = $<HTMLDivElement>("chatBanner");
+
+const HISTORY_KEY = "chatHistory";
+let chatHistoryArr: ChatMessage[] = [];
+let streaming = false;
+let blockCounter = 0;
+let stepCounter  = 0;
+
+function loadHistory(): void {
+  try {
+    const raw = sessionStorage.getItem(HISTORY_KEY);
+    chatHistoryArr = raw ? JSON.parse(raw) : [];
+  } catch { chatHistoryArr = []; }
+  chatMessages.innerHTML = "";
+  chatHistoryArr.forEach(renderMessage);
+}
+function persistHistory(): void { sessionStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistoryArr)); }
+
+function checkChatReadiness(): void {
+  if (!lastStatus || !lastStatus.a.running || !lastStatus.a.healthy) {
+    chatBanner.textContent = "⚠ Main Model (A) is not running. Go to Launcher tab and Start.";
+    chatBanner.classList.add("show");
+    chatSend.disabled = true;
+  } else if (usePatcher.checked && (!lastStatus.b.running || !lastStatus.b.healthy)) {
+    chatBanner.textContent = "ℹ Chat will work, but patcher (B) is offline — inline fixes disabled.";
+    chatBanner.classList.add("show");
+    chatSend.disabled = false;
+  } else {
+    chatBanner.classList.remove("show");
+    chatSend.disabled = false;
+  }
+}
+
+function renderMessage(msg: ChatMessage): HTMLDivElement {
+  const wrap = document.createElement("div");
+  wrap.className = "msg " + (msg.role === "user" ? "msg-user" : "msg-asst");
+  const role = document.createElement("div");
+  role.className = "msg-role";
+  role.textContent = msg.role === "user" ? "You" : "Model A";
+  const content = document.createElement("div");
+  content.className = "msg-content";
+  if (msg.role === "assistant") {
+    renderAssistantContent(content, msg.content);
+  } else {
+    content.textContent = msg.content;
+  }
+  wrap.appendChild(role);
+  wrap.appendChild(content);
+  chatMessages.appendChild(wrap);
+  chatMessages.scrollTop = chatMessages.scrollHeight;
+  return wrap;
+}
+
+// ===== Step Extractor + code block wrapping =====
+const COMMAND_LANGS = new Set(["bash","sh","cmd","powershell","ps1","pwsh","batch","bat","zsh","fish","shell","console"]);
+
+function renderAssistantContent(container: HTMLElement, markdown: string): void {
+  const html = DOMPurify.sanitize(marked.parse(markdown));
+  const tmp = document.createElement("div");
+  tmp.innerHTML = html;
+
+  // Assign step-N to headers and ordered-list items
+  tmp.querySelectorAll("h1, h2, h3, h4").forEach(el => {
+    (el as HTMLElement).id = `step-${++stepCounter}`;
+  });
+  tmp.querySelectorAll("ol > li").forEach(el => {
+    (el as HTMLElement).id = `step-${++stepCounter}`;
+  });
+
+  // Wrap <pre><code> blocks with our header + action bar
+  tmp.querySelectorAll("pre > code").forEach(codeEl => {
+    const pre = codeEl.parentElement as HTMLPreElement;
+    const blockId = `code-block-${++blockCounter}`;
+    const langMatch = (codeEl.className || "").match(/language-(\S+)/);
+    const lang = langMatch ? langMatch[1].toLowerCase() : "";
+    const content = codeEl.textContent || "";
+
+    const wrap = document.createElement("div");
+    wrap.className = "code-block-wrap";
+    wrap.dataset.blockId = blockId;
+    wrap.dataset.lang = lang;
+    wrap.dataset.original = content;
+
+    const header = document.createElement("div");
+    header.className = "code-block-header";
+    header.innerHTML = `<span class="lang">${lang || "code"} · ${blockId}</span>
+      <span class="actions-small">
+        <button class="btn-copy" title="Copy">Copy</button>
+        <button class="btn-problem" title="I have a problem with this">⚠ Problem?</button>
+      </span>`;
+
+    wrap.appendChild(header);
+    pre.replaceWith(wrap);        // detach pre, put wrap in its place
+    wrap.appendChild(pre);        // now move pre inside wrap
+
+    const problemBar = document.createElement("div");
+    problemBar.className = "btn-problem-bar";
+    problemBar.innerHTML = `<button>⚠ Got an error with this command? Click to fix with patcher</button>`;
+    wrap.appendChild(problemBar);
+
+    (header.querySelector(".btn-copy") as HTMLButtonElement).addEventListener("click", () => {
+      navigator.clipboard.writeText(codeEl.textContent || "");
+    });
+    (header.querySelector(".btn-problem") as HTMLButtonElement).addEventListener("click", () => openErrorModal(wrap));
+    (problemBar.querySelector("button") as HTMLButtonElement).addEventListener("click", () => openErrorModal(wrap));
+  });
+
+  container.appendChild(tmp);
+
+  // Trigger inline patcher for command blocks
+  const profile = loadProfile();
+  const patcherReady = lastStatus?.b.running && lastStatus.b.healthy && usePatcher.checked;
+  console.log(`[step-extractor] steps=${stepCounter} blocks=${blockCounter} patcherReady=${patcherReady}`);
+  if (patcherReady) {
+    container.querySelectorAll<HTMLDivElement>(".code-block-wrap").forEach(wrap => {
+      const lang = wrap.dataset.lang || "";
+      console.log(`[step-extractor] block ${wrap.dataset.blockId} lang="${lang}" isCommand=${COMMAND_LANGS.has(lang)}`);
+      if (COMMAND_LANGS.has(lang)) runInlinePatch(wrap, profile);
+    });
+  } else {
+    console.log("[step-extractor] patcher skipped — B not healthy or disabled");
+  }
+}
+
+// ===== Patcher helpers =====
+function extractPatcherReply(data: any): string {
+  const msg = data?.choices?.[0]?.message;
+  if (!msg) return "";
+  // Prefer content; fall back to reasoning_content for thinking models
+  const content = (msg.content || "").trim();
+  if (content) return content;
+  // reasoning_content fallback: extract last code block or last non-empty line
+  const reasoning = (msg.reasoning_content || "").trim();
+  if (!reasoning) return "";
+  console.warn("[patcher] content empty, extracting from reasoning_content");
+  // Try to find the last ```...``` block in the reasoning
+  const codeBlocks = [...reasoning.matchAll(/```[\w]*\n?([\s\S]*?)```/g)];
+  if (codeBlocks.length) return codeBlocks[codeBlocks.length - 1][1].trim();
+  // Fallback: last non-empty line
+  const lines = reasoning.split("\n").map((l: string) => l.trim()).filter(Boolean);
+  return lines[lines.length - 1] || "";
+}
+
+// ===== Inline Patcher =====
+async function runInlinePatch(wrap: HTMLDivElement, profile: EnvProfile): Promise<void> {
+  const original = wrap.dataset.original || "";
+  const lang = wrap.dataset.lang || "";
+  const prompt = [
+    `You are a shell command patcher. The user's environment is:`,
+    profileToSystemPrompt(profile),
+    ``,
+    `The assistant just produced this command block (language: ${lang}):`,
+    "```",
+    original,
+    "```",
+    ``,
+    `If the command needs rewriting for the user's shell (${profile.shell}) or rules, respond with ONLY the corrected command — no markdown fences, no explanation. If no change is needed, respond with the single word: UNCHANGED`,
+  ].join("\n");
+
+  console.log(`[patcher] inline: blockId=${wrap.dataset.blockId} lang=${lang}`);
+  try {
+    const r = await fetch("/api/chat/patcher", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [
+          { role: "system", content: "/no_think" },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.1, max_tokens: 1024,
+      }),
+    });
+    const data = await r.json();
+    console.log(`[patcher] inline response (status ${r.status}) finish_reason=${data?.choices?.[0]?.finish_reason}:`, data?.choices?.[0]?.message);
+    if (!r.ok) { console.warn("[patcher] inline: HTTP error", r.status, data); return; }
+    const reply: string = extractPatcherReply(data);
+    console.log(`[patcher] inline reply: "${reply}"`);
+    if (!reply || reply === "UNCHANGED" || reply === original.trim()) {
+      console.log("[patcher] inline: no change needed");
+      return;
+    }
+    const cleaned = reply.replace(/^```\w*\n?/, "").replace(/\n?```$/, "").trim();
+    if (cleaned.length < 3) { console.warn("[patcher] inline: reply too short, skipping"); return; }
+    applyPatch(wrap, cleaned, `auto-translated → ${profile.shell}`);
+  } catch (e) {
+    console.error("[patcher] inline error:", e);
+  }
+}
+
+function applyPatch(wrap: HTMLDivElement, newContent: string, badgeText: string): void {
+  const pre = wrap.querySelector("pre") as HTMLPreElement;
+  const code = pre.querySelector("code") as HTMLElement;
+  code.textContent = newContent;
+
+  wrap.querySelector(".patch-badge")?.remove();
+  const badge = document.createElement("div");
+  badge.className = "patch-badge";
+  badge.innerHTML = `<span>✓ ${badgeText}</span><button class="btn-undo">↶ undo</button>`;
+  wrap.appendChild(badge);
+  (badge.querySelector(".btn-undo") as HTMLButtonElement).addEventListener("click", () => {
+    code.textContent = wrap.dataset.original || "";
+    badge.remove();
+  });
+}
+
+// ===== Error Popup =====
+const errModal      = $<HTMLDivElement>("errModal");
+const errBlockEl    = $<HTMLPreElement>("errBlock");
+const errStderr     = $<HTMLTextAreaElement>("errStderr");
+const errFixContainer = $<HTMLDivElement>("errFixContainer");
+const errSubmit     = $<HTMLButtonElement>("errSubmit");
+const errCancel     = $<HTMLButtonElement>("errCancel");
+const errPaste      = $<HTMLButtonElement>("errPaste");
+let errActiveWrap: HTMLDivElement | null = null;
+
+function openErrorModal(wrap: HTMLDivElement): void {
+  errActiveWrap = wrap;
+  errBlockEl.textContent = wrap.querySelector("code")?.textContent || "";
+  errStderr.value = "";
+  errFixContainer.innerHTML = "";
+  errSubmit.disabled = false;
+  errSubmit.textContent = "Ask patcher";
+  errModal.classList.add("show");
+  setTimeout(() => errStderr.focus(), 50);
+}
+function closeErrorModal(): void { errModal.classList.remove("show"); errActiveWrap = null; }
+
+errCancel.addEventListener("click", closeErrorModal);
+errModal.addEventListener("click", (e) => { if (e.target === errModal) closeErrorModal(); });
+document.addEventListener("keydown", (e) => { if (e.key === "Escape" && errModal.classList.contains("show")) closeErrorModal(); });
+
+errPaste.addEventListener("click", async () => {
+  try { errStderr.value = await navigator.clipboard.readText(); }
+  catch { alert("Clipboard access denied"); }
+});
+
+errSubmit.addEventListener("click", async () => {
+  if (!errActiveWrap || !errStderr.value.trim()) return;
+  const code = errActiveWrap.querySelector("code")?.textContent || "";
+  const profile = loadProfile();
+  const prompt = [
+    `User environment:`,
+    profileToSystemPrompt(profile),
+    ``,
+    `The user ran this command:`,
+    "```",
+    code,
+    "```",
+    ``,
+    `They got this error:`,
+    "```",
+    errStderr.value.trim(),
+    "```",
+    ``,
+    `Propose a concrete fix. Respond with two sections: `,
+    `1. "Fix:" — a one-line fixed command (no fences)`,
+    `2. "Why:" — one short sentence`,
+  ].join("\n");
+
+  console.log("[patcher] error-popup prompt:\n" + prompt);
+  errSubmit.disabled = true;
+  errSubmit.textContent = "Thinking…";
+  try {
+    const r = await fetch("/api/chat/patcher", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        messages: [
+          { role: "system", content: "/no_think" },
+          { role: "user", content: prompt },
+        ],
+        temperature: 0.2, max_tokens: 1500,
+      }),
+    });
+    const data = await r.json();
+    console.log(`[patcher] error-popup response (status ${r.status}) finish_reason=${data?.choices?.[0]?.finish_reason}:`, data?.choices?.[0]?.message);
+    if (!r.ok) throw new Error(data?.detail || `HTTP ${r.status}`);
+    const reply: string = extractPatcherReply(data);
+    if (!reply) throw new Error(`No content in response. Keys: ${Object.keys(data).join(", ")}`);
+
+    const fixMatch = reply.match(/Fix:\s*([\s\S]*?)(?:\n\s*Why:|\s*$)/i);
+    const whyMatch = reply.match(/Why:\s*([\s\S]*)/i);
+    const fix = (fixMatch?.[1] || reply).trim().replace(/^```\w*\n?/, "").replace(/\n?```$/, "").trim();
+    const why = (whyMatch?.[1] || "").trim();
+
+    errFixContainer.innerHTML = "";
+    const box = document.createElement("div");
+    box.className = "err-fix-box";
+    box.innerHTML = `<div style="color:#86efac;font-weight:600;margin-bottom:4px">Proposed fix</div>
+      <pre></pre>
+      ${why ? `<div style="color:#aaa;font-size:12px">${why.replace(/</g,"&lt;")}</div>` : ""}
+      <div style="margin-top:8px"><button class="err-btn-apply">✓ Apply to block</button></div>`;
+    (box.querySelector("pre") as HTMLElement).textContent = fix;
+    errFixContainer.appendChild(box);
+    (box.querySelector(".err-btn-apply") as HTMLButtonElement).addEventListener("click", () => {
+      if (errActiveWrap) applyPatch(errActiveWrap, fix, "patched from error");
+      closeErrorModal();
+    });
+  } catch (e: any) {
+    errFixContainer.innerHTML = `<div style="color:#fca5a5;font-size:13px">Patcher failed: ${e.message || e}</div>`;
+  } finally {
+    errSubmit.disabled = false;
+    errSubmit.textContent = "Ask patcher";
+  }
+});
+
+// ===== Streaming send =====
+async function sendMessage(): Promise<void> {
+  const text = chatInput.value.trim();
+  if (!text || streaming) return;
+  if (!lastStatus?.a.running || !lastStatus.a.healthy) {
+    checkChatReadiness();
+    return;
+  }
+
+  chatInput.value = "";
+  const userMsg: ChatMessage = { role: "user", content: text };
+  chatHistoryArr.push(userMsg);
+  renderMessage(userMsg);
+
+  const asstMsg: ChatMessage = { role: "assistant", content: "" };
+  chatHistoryArr.push(asstMsg);
+  const asstDiv = renderMessage(asstMsg);
+  const asstContent = asstDiv.querySelector(".msg-content") as HTMLDivElement;
+  asstContent.textContent = "…";
+
+  streaming = true;
+  chatSend.disabled = true;
+
+  const profile = loadProfile();
+  const systemPrompt = profileToSystemPrompt(profile);
+
+  const body = {
+    messages: [
+      { role: "system", content: systemPrompt },
+      ...chatHistoryArr.filter(m => m.role !== "system").slice(0, -1),  // exclude the empty assistant placeholder
+    ],
+    stream: true,
+    temperature: 0.7,
+  };
+
+  try {
+    const r = await fetch("/api/chat/main", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    if (!r.ok || !r.body) {
+      const errText = await r.text();
+      throw new Error(errText || `HTTP ${r.status}`);
+    }
+
+    const reader = r.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+    let accumulated = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const lines = buffer.split("\n");
+      buffer = lines.pop() || "";
+      for (const line of lines) {
+        const t = line.trim();
+        if (!t.startsWith("data:")) continue;
+        const payload = t.slice(5).trim();
+        if (payload === "[DONE]") continue;
+        try {
+          const obj = JSON.parse(payload);
+          const delta = obj?.choices?.[0]?.delta?.content;
+          if (delta) {
+            accumulated += delta;
+            asstContent.textContent = accumulated;
+            chatMessages.scrollTop = chatMessages.scrollHeight;
+          }
+        } catch { /* ignore */ }
+      }
+    }
+
+    asstMsg.content = accumulated;
+    asstContent.innerHTML = "";
+    renderAssistantContent(asstContent, accumulated);
+    persistHistory();
+  } catch (e: any) {
+    asstContent.innerHTML = `<span style="color:#fca5a5">Error: ${e.message || e}</span>`;
+    chatHistoryArr.pop();  // remove failed assistant msg
+  } finally {
+    streaming = false;
+    chatSend.disabled = false;
+    chatInput.focus();
+  }
+}
+
+chatSend.addEventListener("click", sendMessage);
+chatInput.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
+});
+chatClear.addEventListener("click", () => {
+  if (!confirm("Clear conversation?")) return;
+  chatHistoryArr = []; blockCounter = 0; stepCounter = 0;
+  chatMessages.innerHTML = "";
+  sessionStorage.removeItem(HISTORY_KEY);
+});
+
+// ========================================================================
+// ==================== INIT =============================================
+// ========================================================================
+loadLauncherSettings();
+loadConfigFallback();
+syncPatcherBlock();
+hydrateProfileForm();
+loadHistory();
+connectWs();
+pollStatus();
+setInterval(pollStatus, 3000);

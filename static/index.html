@@ -1,0 +1,616 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>LLM Launcher — Operational Mode</title>
+  <script src="https://cdn.jsdelivr.net/npm/marked@12.0.2/marked.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/dompurify@3.0.11/dist/purify.min.js"></script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+    body {
+      font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+      background: #1a1a1a;
+      color: #e0e0e0;
+      min-height: 100vh;
+      display: flex;
+      justify-content: center;
+      align-items: flex-start;
+      padding: 32px 16px;
+    }
+
+    .card {
+      background: #2a2a2a;
+      border-radius: 12px;
+      box-shadow: 0 8px 32px rgba(0,0,0,0.5);
+      padding: 24px 28px;
+      width: 100%;
+      max-width: 900px;
+    }
+
+    h1 { color: #61dafb; font-size: 20px; font-weight: 600; margin-bottom: 16px; }
+
+    /* Tabs */
+    .tabs {
+      display: flex;
+      gap: 4px;
+      border-bottom: 1px solid #3a3a3a;
+      margin-bottom: 20px;
+    }
+    .tab-btn {
+      background: none;
+      border: none;
+      color: #888;
+      padding: 10px 16px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      border-bottom: 2px solid transparent;
+      transition: color .15s, border-color .15s;
+    }
+    .tab-btn:hover { color: #ccc; }
+    .tab-btn.active {
+      color: #61dafb;
+      border-bottom-color: #61dafb;
+    }
+    .tab-btn .tab-dot {
+      display: inline-block;
+      width: 6px; height: 6px;
+      border-radius: 50%;
+      margin-left: 6px;
+      background: #555;
+    }
+    .tab-btn .tab-dot.green { background: #22c55e; box-shadow: 0 0 5px #22c55e88; }
+
+    .tab-panel { display: none; }
+    .tab-panel.active { display: block; }
+
+    /* ==== LAUNCHER TAB (existing) ==== */
+    .models-row {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 16px;
+      margin-bottom: 16px;
+    }
+
+    .model-block {
+      background: #222;
+      border: 1px solid #3a3a3a;
+      border-radius: 8px;
+      padding: 16px;
+    }
+    .model-block.disabled { opacity: 0.45; pointer-events: none; }
+
+    .model-block h2 {
+      font-size: 13px;
+      font-weight: 600;
+      color: #aaa;
+      text-transform: uppercase;
+      letter-spacing: .05em;
+      margin-bottom: 12px;
+      display: flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .model-block h2 .dot { width:8px; height:8px; border-radius:50%; background:#555; flex-shrink:0; }
+
+    .field { margin-bottom: 10px; }
+    label { display: block; font-size: 12px; color: #888; margin-bottom: 4px; }
+
+    .row { display: flex; gap: 6px; }
+
+    input[type="text"], input[type="number"], textarea, select {
+      width: 100%;
+      padding: 8px 10px;
+      background: #333;
+      border: 1px solid #484848;
+      border-radius: 6px;
+      color: #e0e0e0;
+      font-size: 13px;
+      font-family: inherit;
+      transition: border-color .15s;
+    }
+    input[type="text"]:focus, input[type="number"]:focus, textarea:focus, select:focus {
+      outline: none; border-color: #61dafb;
+    }
+    input[type="number"] { width: 90px; flex-shrink: 0; }
+    textarea { resize: vertical; }
+
+    .shared-row {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 16px;
+      align-items: end;
+      margin-bottom: 16px;
+    }
+
+    .patcher-toggle {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      font-size: 13px;
+      color: #ccc;
+      cursor: pointer;
+      user-select: none;
+      margin-bottom: 16px;
+    }
+    .patcher-toggle input { width: 15px; height: 15px; cursor: pointer; accent-color: #61dafb; }
+
+    .btn {
+      padding: 8px 14px;
+      border: none; border-radius: 6px;
+      font-size: 13px; font-weight: 600;
+      cursor: pointer;
+      transition: background .15s, opacity .15s;
+      white-space: nowrap;
+    }
+    .btn:disabled { opacity: .4; cursor: not-allowed; }
+    .btn-browse { background: #444; color: #ccc; }
+    .btn-browse:hover:not(:disabled) { background: #555; }
+
+    .actions { display: flex; gap: 10px; margin-bottom: 16px; }
+    #startBtn { background: #238636; color: #fff; flex: 1; padding: 12px; font-size: 15px; }
+    #startBtn:hover:not(:disabled) { background: #2ea043; }
+    #stopBtn  { background: #b91c1c; color: #fff; flex: 1; padding: 12px; font-size: 15px; display: none; }
+    #stopBtn:hover { background: #dc2626; }
+
+    .open-chat-row { display: flex; gap: 10px; margin-bottom: 16px; }
+    .btn-chat {
+      flex: 1; padding: 9px; font-size: 13px; font-weight: 600;
+      background: #1d4ed8; color: #fff;
+      border: none; border-radius: 6px; cursor: pointer;
+      transition: background .15s;
+      display: none;
+    }
+    .btn-chat:hover { background: #2563eb; }
+
+    .dot { width:9px; height:9px; border-radius:50%; display:inline-block; }
+    .dot-gray   { background: #555; }
+    .dot-yellow { background: #f59e0b; box-shadow: 0 0 5px #f59e0b88; }
+    .dot-green  { background: #22c55e; box-shadow: 0 0 5px #22c55e88; }
+    .dot-red    { background: #ef4444; box-shadow: 0 0 5px #ef444488; }
+
+    #console {
+      background: #111;
+      border: 1px solid #333;
+      border-radius: 6px;
+      padding: 10px 12px;
+      height: 180px;
+      overflow-y: auto;
+      font-family: 'Consolas', monospace;
+      font-size: 12px;
+      line-height: 1.5;
+    }
+    .log-entry  { color: #ccc; }
+    .log-a      { color: #7dd3fc; }
+    .log-b      { color: #86efac; }
+    .log-error  { color: #fca5a5; }
+    .log-info   { color: #aaa; }
+
+    /* ==== CHAT TAB ==== */
+    .chat-wrap { display: flex; flex-direction: column; height: 72vh; min-height: 500px; }
+    .chat-banner {
+      background: #3a2a10;
+      color: #fbbf24;
+      padding: 10px 14px;
+      border-radius: 6px;
+      font-size: 13px;
+      margin-bottom: 10px;
+      display: none;
+    }
+    .chat-banner.show { display: block; }
+
+    .chat-messages {
+      flex: 1;
+      overflow-y: auto;
+      background: #1e1e1e;
+      border: 1px solid #333;
+      border-radius: 8px;
+      padding: 16px;
+      margin-bottom: 12px;
+    }
+    .msg {
+      margin-bottom: 18px;
+      line-height: 1.55;
+      font-size: 14px;
+    }
+    .msg-role {
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: .08em;
+      color: #888;
+      margin-bottom: 6px;
+      font-weight: 600;
+    }
+    .msg-user     .msg-role { color: #61dafb; }
+    .msg-asst     .msg-role { color: #86efac; }
+    .msg-content  { color: #ddd; }
+    .msg-content p { margin-bottom: 8px; }
+    .msg-content ul, .msg-content ol { margin: 8px 0 8px 22px; }
+    .msg-content h1, .msg-content h2, .msg-content h3 { margin: 10px 0 6px; color: #e0e0e0; }
+    .msg-content a { color: #61dafb; }
+    .msg-content code:not(pre code) {
+      background: #2f2f2f; padding: 1px 6px; border-radius: 3px; font-size: 12.5px;
+      font-family: 'Consolas', monospace;
+    }
+
+    .code-block-wrap {
+      position: relative;
+      margin: 10px 0;
+      background: #0e0e0e;
+      border: 1px solid #2d2d2d;
+      border-radius: 6px;
+      overflow: hidden;
+    }
+    .code-block-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 10px;
+      background: #1a1a1a;
+      border-bottom: 1px solid #2a2a2a;
+      font-size: 11px;
+      color: #888;
+    }
+    .code-block-header .lang { color: #888; font-family: 'Consolas', monospace; }
+    .code-block-header .actions-small { display: flex; gap: 6px; }
+    .code-block-header button {
+      background: #333;
+      border: none;
+      color: #ccc;
+      padding: 3px 8px;
+      font-size: 11px;
+      border-radius: 3px;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    .code-block-header button:hover { background: #444; }
+    .btn-problem  { color: #fbbf24 !important; }
+    .btn-problem:hover { background: #3a2a10 !important; }
+
+    .code-block-wrap pre {
+      margin: 0; padding: 10px 12px;
+      font-family: 'Consolas', monospace;
+      font-size: 12.5px;
+      line-height: 1.45;
+      color: #d0d0d0;
+      overflow-x: auto;
+      white-space: pre;
+    }
+
+    .patch-badge {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 6px 10px;
+      background: #1a3a1a;
+      color: #86efac;
+      font-size: 11px;
+      border-top: 1px solid #2a5a2a;
+    }
+    .patch-badge button {
+      background: transparent;
+      border: 1px solid #86efac55;
+      color: #86efac;
+      padding: 2px 8px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+    }
+    .patch-badge button:hover { background: #86efac22; }
+
+    .chat-input-row {
+      display: flex;
+      gap: 8px;
+      align-items: flex-end;
+    }
+    .chat-input-row textarea {
+      flex: 1;
+      min-height: 50px;
+      max-height: 200px;
+    }
+    #chatSend {
+      background: #238636;
+      color: #fff;
+      padding: 10px 18px;
+      font-size: 14px;
+      font-weight: 600;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: background .15s;
+    }
+    #chatSend:hover:not(:disabled) { background: #2ea043; }
+    #chatSend:disabled { opacity: .4; cursor: not-allowed; }
+    #chatClear {
+      background: #444;
+      color: #ccc;
+      padding: 10px 14px;
+      border: none;
+      border-radius: 6px;
+      cursor: pointer;
+      font-size: 13px;
+    }
+    #chatClear:hover { background: #555; }
+
+    /* Error popup modal */
+    .err-modal-backdrop {
+      position: fixed;
+      inset: 0;
+      background: rgba(0,0,0,0.65);
+      display: none;
+      align-items: center;
+      justify-content: center;
+      z-index: 1000;
+    }
+    .err-modal-backdrop.show { display: flex; }
+    .err-modal {
+      background: #2a2a2a;
+      border-radius: 10px;
+      padding: 20px 24px;
+      width: 560px;
+      max-width: 92vw;
+      max-height: 88vh;
+      overflow-y: auto;
+      box-shadow: 0 16px 40px rgba(0,0,0,0.6);
+    }
+    .err-modal h3 {
+      color: #fbbf24;
+      font-size: 15px;
+      margin-bottom: 12px;
+    }
+    .err-modal pre {
+      background: #111;
+      padding: 8px 10px;
+      border-radius: 4px;
+      font-size: 12px;
+      max-height: 140px;
+      overflow: auto;
+      margin-bottom: 10px;
+      white-space: pre-wrap;
+    }
+    .err-modal textarea { min-height: 100px; margin-bottom: 10px; }
+    .err-modal-actions { display: flex; gap: 8px; justify-content: flex-end; }
+    .err-modal-actions button {
+      padding: 7px 14px;
+      border: none;
+      border-radius: 5px;
+      font-size: 13px;
+      cursor: pointer;
+      font-weight: 600;
+    }
+    .err-btn-cancel { background: #444; color: #ccc; }
+    .err-btn-submit { background: #1d4ed8; color: #fff; }
+    .err-btn-submit:disabled { opacity: .4; cursor: not-allowed; }
+    .err-btn-apply  { background: #238636; color: #fff; }
+    .err-btn-paste  { background: #555; color: #eee; padding: 4px 10px !important; font-size: 11px !important; }
+    .err-fix-box {
+      background: #1a3a1a; border: 1px solid #2a5a2a;
+      border-radius: 5px; padding: 10px;
+      margin-bottom: 10px;
+      font-size: 13px;
+    }
+    .err-fix-box pre { background: #0e0e0e; margin: 6px 0; }
+
+    .btn-problem-bar { border-top: 1px solid #2d2d2d; }
+    .btn-problem-bar button {
+      width: 100%; background: #1e1a0e; border: none;
+      color: #fbbf24; padding: 8px 12px; font-size: 12px;
+      text-align: left; cursor: pointer; transition: background .15s;
+    }
+    .btn-problem-bar button:hover { background: #2d2510; }
+
+    /* ==== PROFILE TAB ==== */
+    .profile-intro {
+      color: #aaa;
+      font-size: 13px;
+      margin-bottom: 18px;
+      line-height: 1.5;
+    }
+    .profile-grid {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 12px 16px;
+      margin-bottom: 14px;
+    }
+    .profile-rules-hint { font-size: 11px; color: #777; margin-top: 4px; }
+    #profileSaved {
+      color: #86efac;
+      font-size: 12px;
+      margin-left: 10px;
+      opacity: 0;
+      transition: opacity .3s;
+    }
+    #profileSaved.show { opacity: 1; }
+  </style>
+</head>
+<body>
+<div class="card">
+  <h1>Operational Mode — LLM Launcher</h1>
+
+  <nav class="tabs">
+    <button class="tab-btn active" data-tab="launcher">Launcher</button>
+    <button class="tab-btn" data-tab="chat">Chat <span class="tab-dot" id="tabDotChat"></span></button>
+    <button class="tab-btn" data-tab="profile">Profile</button>
+  </nav>
+
+  <!-- ====== LAUNCHER TAB ====== -->
+  <section class="tab-panel active" id="panel-launcher">
+    <div class="models-row">
+      <div class="model-block" id="blockA">
+        <h2><span class="dot dot-gray" id="dotA"></span>Main Model</h2>
+        <div class="field">
+          <label>Model (.gguf)</label>
+          <div class="row">
+            <input type="text" id="pathA" placeholder="Path to model.gguf…">
+            <button class="btn btn-browse" id="browseA">Browse…</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Extra arguments</label>
+          <input type="text" id="argsA" value="-c 16384 -ngl 99 -t 6 --no-mmap --flash-attn on">
+        </div>
+        <div class="field">
+          <label>Port</label>
+          <input type="number" id="portA" value="8080" min="1024" max="65535">
+        </div>
+        <div style="font-size:12px;color:#888;" id="statusA">Stopped</div>
+      </div>
+
+      <div class="model-block" id="blockB">
+        <h2><span class="dot dot-gray" id="dotB"></span>Patcher Model</h2>
+        <div class="field">
+          <label>Model (.gguf)</label>
+          <div class="row">
+            <input type="text" id="pathB" placeholder="Path to model.gguf…">
+            <button class="btn btn-browse" id="browseB">Browse…</button>
+          </div>
+        </div>
+        <div class="field">
+          <label>Extra arguments</label>
+          <input type="text" id="argsB" value="-c 4096 -ngl 99 -t 4">
+        </div>
+        <div class="field">
+          <label>Port</label>
+          <input type="number" id="portB" value="8081" min="1024" max="65535">
+        </div>
+        <div style="font-size:12px;color:#888;" id="statusB">Disabled</div>
+      </div>
+    </div>
+
+    <label class="patcher-toggle">
+      <input type="checkbox" id="usePatcher" checked>
+      Enable patcher model (Model B)
+    </label>
+
+    <div class="shared-row">
+      <div class="field" style="margin:0">
+        <label>llama-server binary</label>
+        <div class="row">
+          <input type="text" id="llamaPath" placeholder="Path to llama-server.exe…">
+          <button class="btn btn-browse" id="browseBin">Browse…</button>
+        </div>
+      </div>
+      <div class="field" style="margin:0">
+        <label>Host</label>
+        <input type="text" id="host" value="0.0.0.0" style="width:130px">
+      </div>
+    </div>
+
+    <div class="actions">
+      <button class="btn" id="startBtn">Start</button>
+      <button class="btn" id="stopBtn">Stop All</button>
+    </div>
+
+    <div class="open-chat-row">
+      <button class="btn-chat" id="chatA">Open Main in llama-server UI ↗</button>
+      <button class="btn-chat" id="chatB">Open Patcher in llama-server UI ↗</button>
+    </div>
+
+    <div id="console">
+      <div class="log-entry log-info">[ready] Waiting to start…</div>
+    </div>
+  </section>
+
+  <!-- ====== CHAT TAB ====== -->
+  <section class="tab-panel" id="panel-chat">
+    <div class="chat-wrap">
+      <div class="chat-banner" id="chatBanner"></div>
+      <div class="chat-messages" id="chatMessages"></div>
+      <div class="chat-input-row">
+        <textarea id="chatInput" placeholder="Ask Model A… (Shift+Enter for newline)" rows="2"></textarea>
+        <button id="chatSend">Send</button>
+        <button id="chatClear" title="Clear conversation">Clear</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- ====== PROFILE TAB ====== -->
+  <section class="tab-panel" id="panel-profile">
+    <p class="profile-intro">
+      Your Environment Profile is injected as a system prompt to every request.
+      The patcher model uses it to rewrite commands that don't match your setup.
+      All fields are saved to <code>localStorage</code> as you type.
+    </p>
+
+    <div class="profile-grid">
+      <div class="field">
+        <label>Shell</label>
+        <select id="prof-shell">
+          <option value="powershell">PowerShell</option>
+          <option value="cmd">cmd.exe</option>
+          <option value="bash">bash</option>
+          <option value="zsh">zsh</option>
+          <option value="fish">fish</option>
+          <option value="pwsh">pwsh (cross-platform)</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Operating system</label>
+        <select id="prof-os">
+          <option value="Windows">Windows</option>
+          <option value="Linux">Linux</option>
+          <option value="macOS">macOS</option>
+        </select>
+      </div>
+      <div class="field">
+        <label>Python version</label>
+        <input type="text" id="prof-python" placeholder="e.g. 3.11">
+      </div>
+      <div class="field">
+        <label>Package manager</label>
+        <select id="prof-pkg">
+          <option value="uv">uv</option>
+          <option value="pip">pip</option>
+          <option value="conda">conda</option>
+          <option value="poetry">poetry</option>
+          <option value="pixi">pixi</option>
+          <option value="npm">npm</option>
+          <option value="pnpm">pnpm</option>
+          <option value="yarn">yarn</option>
+          <option value="cargo">cargo</option>
+          <option value="other">other</option>
+        </select>
+      </div>
+      <div class="field" style="grid-column:1/-1">
+        <label>Naming convention</label>
+        <input type="text" id="prof-naming" placeholder="e.g. snake_case for python, kebab-case for folders">
+      </div>
+      <div class="field" style="grid-column:1/-1">
+        <label>Custom rules (one per line)</label>
+        <textarea id="prof-rules" rows="6"
+          placeholder="always use venv&#10;never install to system python&#10;prefer async/await over callbacks"></textarea>
+        <div class="profile-rules-hint">These are appended to the system prompt. Keep them short and actionable.</div>
+      </div>
+    </div>
+
+    <div style="display:flex;align-items:center">
+      <button class="btn" id="profileSave" style="background:#238636;color:#fff;padding:10px 20px">Save</button>
+      <span id="profileSaved">✓ Saved</span>
+    </div>
+  </section>
+</div>
+
+<!-- Error popup modal -->
+<div class="err-modal-backdrop" id="errModal">
+  <div class="err-modal">
+    <h3>⚠ Fix this step</h3>
+    <div style="color:#888;font-size:12px;margin-bottom:6px">Code block:</div>
+    <pre id="errBlock"></pre>
+    <div style="color:#888;font-size:12px;margin-bottom:6px">Paste the error output from your terminal:</div>
+    <textarea id="errStderr" placeholder="ImportError: No module named 'fastapi'"></textarea>
+    <div style="margin-bottom:10px">
+      <button class="err-btn-paste" id="errPaste">📋 Paste from clipboard</button>
+    </div>
+    <div id="errFixContainer"></div>
+    <div class="err-modal-actions">
+      <button class="err-btn-cancel" id="errCancel">Cancel</button>
+      <button class="err-btn-submit" id="errSubmit">Ask patcher</button>
+    </div>
+  </div>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>
