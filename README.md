@@ -1,51 +1,45 @@
+<div align="center">
+
 # Token Saving Replay Agent
 
-**The obvious fix everyone keeps ducking under.**
+### A tiny local model sits next to your big one and handles the dumb fixes — so your context stays clean.
 
-When you use a big LLM (Claude, GPT-4o, Grok, local 70B) to walk through a multi-step task, one small environment mismatch — wrong shell, wrong package manager, wrong OS — causes a chain reaction:
+[![License: Apache 2.0](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](LICENSE)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10%2B-blue)](https://python.org)
+[![llama.cpp](https://img.shields.io/badge/backend-llama.cpp-green)](https://github.com/ggml-org/llama.cpp)
+[![Stars](https://img.shields.io/github/stars/yevgentumanov/token-saving-replay-agent?style=social)](https://github.com/yevgentumanov/token-saving-replay-agent)
+
+</div>
+
+---
+
+## The problem
+
+You're using a big model (70B, Claude, GPT-4o) to walk through a 30-step task. One environment mismatch hits:
 
 1. Model gives you `pip install fastapi` — you use `uv`
-2. You paste the error back — model re-reads the whole context
+2. You paste the error back — model re-reads the entire context
 3. It fixes step 3. Step 7 breaks. Repeat.
-4. 15,000 tokens burned. Context polluted. You're tired.
+4. **15,000 tokens burned. Context polluted. You're tired.**
 
-**Token Saving Replay Agent breaks the chain.**
-
-A tiny local model (~1-3B) sits next to the big one. It handles micro-fixes in real time — shell translations, path corrections, missing sudo, version mismatches — without touching the main model's context. The big model stays clean and focused on the hard thinking.
+The actual fix needed ~300 tokens. You spent 15,000.
 
 ---
 
-## What it does
+## The solution
 
-### Environment Profile
-You describe your setup once: shell, OS, Python version, package manager, custom rules. This becomes a system prompt automatically prepended to every request. The main model already knows you use PowerShell + uv before you type a word.
+A **small model (1–3B)** runs beside your big one. It handles micro-fixes in real time — shell translations, path corrections, missing `sudo`, version mismatches — **without touching the main model's context at all.**
 
-### Inline Patcher
-After the main model responds, the patcher model scans every command block. If a command doesn't match your shell or rules, it silently rewrites it — `pip install fastapi` → `uv add fastapi`, `mkdir -p foo/bar` → `mkdir foo\bar -Force`. A small badge appears. You can undo with one click.
+> Big model stays focused on hard thinking.  
+> Small model handles the mechanical noise.
 
-### Error Popup
-A command failed? Click **⚠ Problem?** on the code block, paste the stderr output, click **Ask patcher**. The small model sees only that one block + your error — not the full conversation. It proposes a fix in ~1 second. Apply it directly.
-
-### Step Extractor
-Every response is parsed into addressable blocks — `step-1`, `step-2`, `code-block-3`. This is the foundation for everything above and for Phase 2.5 (Consolidation Pass) coming next.
+<!-- SCREENSHOT: split terminal showing two llama-server instances running side by side -->
 
 ---
 
-## Token savings
+## Quick start — Windows (zero-install)
 
-| Scenario | Without Token Saving Replay Agent | With Token Saving Replay Agent |
-|----------|-----------------------------------|--------------------------------|
-| Wrong shell in 1 block | Re-send full context (~5k tokens) | Patcher call (~300 tokens) |
-| Error on step 5 of 10 | Re-explain + full context (~8k tokens) | Error popup (~400 tokens) |
-| 3 env mismatches in one reply | 3× full re-sends | 3× parallel patcher calls |
-
-Typical savings on a 30-step technical task: **70–90% of micro-fix tokens**.
-
----
-
-## Быстрый старт (Windows) — zero-install
-
-> Нужны только Git и двойной клик. Python, llama-server и зависимости скачиваются автоматически.
+> No Python needed on your system. No admin rights. No Docker. Just Git.
 
 ```bat
 git clone https://github.com/yevgentumanov/token-saving-replay-agent.git
@@ -53,28 +47,28 @@ cd token-saving-replay-agent
 start.bat
 ```
 
-**Что происходит при первом запуске:**
+**That's it.** On first run, `start.bat` does everything automatically:
 
-| Шаг | Действие |
-|-----|---------|
-| 1 | Скачивается portable Python 3.12 (~7 MB) в папку `./python/` |
-| 2 | Устанавливаются зависимости из `requirements.txt` |
-| 3 | Скачивается `llama-server.exe` (Windows x64, Vulkan/AVX2) в `./bin/` |
-| 4 | Открывается диалог выбора файла — выберите вашу большую `.gguf` модель |
-| 5 | Открывается диалог — выберите маленькую `.gguf` модель для патчера |
-| 6 | Запускается FastAPI и открывается браузер на `http://localhost:7860` |
+| Step | What happens |
+|------|-------------|
+| 1 | Downloads portable Python 3.12 (~7 MB) into `./python/` |
+| 2 | Installs Python dependencies from `requirements.txt` |
+| 3 | Downloads `llama-server.exe` (b8855, Windows x64 CPU) into `./bin/` |
+| 4 | Opens a file dialog — pick your **main** `.gguf` model |
+| 5 | Opens a file dialog — pick your **patcher** `.gguf` model |
+| 6 | Launches both servers and opens `http://localhost:7860` in your browser |
 
-<!-- screenshot: окно терминала с прогресс-логом трёх шагов настройки -->
+**Subsequent runs:** `start.bat` skips all setup and goes straight to the app.
 
-**Повторный запуск:** `start.bat` сразу открывает браузер — переустановки нет.
+<!-- GIF: start.bat running for the first time — progress log scrolling, then browser opening -->
 
-**Требования:** Windows 10/11, ~500 MB свободного места, интернет при первом запуске.
+**Requirements:** Windows 10/11 · ~500 MB free space · internet on first run only
 
-**Не нужно:** Python в системе, права администратора, Docker, npm.
+**Not required:** Python · admin rights · Docker · npm · anything else
 
 ---
 
-## How to run (manual / cross-platform)
+## Quick start — Manual / cross-platform
 
 ```bash
 git clone https://github.com/yevgentumanov/token-saving-replay-agent.git
@@ -83,29 +77,79 @@ pip install -r requirements.txt
 python main.py
 ```
 
-Browser opens at `http://localhost:7860`. No Docker, no installer, no npm.
+You also need `llama-server` from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) and one or two `.gguf` model files. Point to them in the Launcher tab.
 
-You need:
-- Python 3.10+
-- `llama-server` binary from [llama.cpp](https://github.com/ggerganov/llama.cpp/releases)
-- One or two `.gguf` model files
+See **[INSTRUCTIONS.md](./INSTRUCTIONS.md)** for the full manual setup guide.
 
-For detailed setup, see **[INSTRUCTIONS.md](./INSTRUCTIONS.md)**.
+---
+
+## How it works
+
+### 🗂 Environment Profile
+Fill in your setup once: shell, OS, Python version, package manager, custom rules. This becomes a system prompt automatically prepended to every request. The main model already knows you use PowerShell + `uv` before you type a word.
+
+### ⚡ Inline Patcher
+After the main model responds, the patcher model silently scans every command block. Mismatches get rewritten automatically:
+
+```
+pip install fastapi  →  uv add fastapi
+mkdir -p foo/bar     →  mkdir foo\bar -Force
+```
+
+A small badge appears. One click to undo.
+
+<!-- SCREENSHOT: chat response with a green "✓ auto-translated → powershell" badge on a code block -->
+
+### 🔧 Error Popup
+A command failed? Click **⚠ Problem?** on the code block, paste the stderr, click **Ask patcher**. The small model sees only that one block + your error — not the full conversation. Fix proposed in ~1 second. Apply directly.
+
+<!-- SCREENSHOT: error popup modal with pasted stderr and proposed fix -->
+
+### 🔢 Step Extractor
+Every response is parsed into addressable blocks (`step-1`, `code-block-3`). Foundation for the Consolidation Pass coming in Phase 2.5.
+
+---
+
+## Token savings
+
+| Scenario | Without | With |
+|----------|---------|------|
+| Wrong shell in 1 block | Re-send full context (~5k tokens) | Patcher call (~300 tokens) |
+| Error on step 5 of 10 | Re-explain + full context (~8k tokens) | Error popup (~400 tokens) |
+| 3 env mismatches in one reply | 3× full re-sends (~15k tokens) | 3× parallel patcher calls (~900 tokens) |
+
+**Typical savings on a 30-step technical task: 70–90% of micro-fix tokens.**
 
 ---
 
 ## Model recommendations
 
-**Main Model (Model A)** — any capable model:
+**Main Model (Model A)** — any capable model works:
 - Qwen3-14B, Qwen2.5-32B, Mistral-7B, LLaMA-3.1-8B, DeepSeek-R1-14B
-- Use Q5 or Q8 quantization for best quality
+- Q5 or Q8 quantization for best quality
 
-**Patcher Model (Model B)** — small and fast:
-- Qwen2.5-1.5B, SmolLM2-1.7B, Llama-3.2-1B, Qwen3-1.7B
-- Speed is the priority, not capability — it only handles one block at a time
-- **Thinking models (Qwen3, DeepSeek-R1, etc.) work fine** — Token Saving Replay Agent sends `/no_think` automatically to skip chain-of-thought and get instant answers. If the model ignores it, answers are extracted from `reasoning_content` as a fallback.
+**Patcher Model (Model B)** — small and fast is what matters:
+- Qwen3-1.7B, Qwen2.5-1.5B, SmolLM2-1.7B, Llama-3.2-1B
+- Speed > capability — it only handles one block at a time
+- **Thinking models work fine** — Token Saving Replay Agent sends `/no_think` automatically to skip chain-of-thought. If the model ignores it, answers are extracted from `reasoning_content` as a fallback.
 
-Both run locally via llama.cpp. No API keys. No cloud.
+Both run locally via llama.cpp. **No API keys. No cloud. No usage costs.**
+
+---
+
+## Architecture
+
+```
+Browser (localhost:7860)
+  └── FastAPI (main.py)
+        ├── /api/chat/main    ──► llama-server A (port 8080) — big model
+        ├── /api/chat/patcher  ──► llama-server B (port 8081) — small patcher
+        ├── /api/start         — launches llama-server subprocesses
+        ├── /api/status        — health check (pings /v1/models every 4s)
+        └── /ws/logs           — streams llama-server stdout in real time
+```
+
+Frontend: pure HTML + TypeScript, no framework, no build step. Compiled `app.js` is committed — end users need nothing.
 
 ---
 
@@ -117,30 +161,19 @@ Both run locally via llama.cpp. No API keys. No cloud.
 | 1 | Dual model launcher — Main + Patcher, independent health checks | ✅ Done |
 | 2 | Core — Chat, Profile, Inline Patcher, Error Popup | ✅ Done |
 | — | Thinking model support — `/no_think` + `reasoning_content` fallback | ✅ Done |
+| — | Portable Windows launcher — zero-install `start.bat` | ✅ Done |
 | 2.5 | Consolidation Pass — summarise patches before next big-model call | 🔜 Next |
-| 3+ | Full Step Extractor, escalation formatter, installers | 📋 Planned |
+| 3+ | Full Step Extractor, escalation formatter, cross-platform installer | 📋 Planned |
 
 ---
 
-## Architecture
+## Contributing
 
-```
-Browser (localhost:7860)
-  └── FastAPI (main.py)
-        ├── /api/chat/main  ──► llama-server A (port 8080) — big model
-        ├── /api/chat/patcher ► llama-server B (port 8081) — small patcher
-        ├── /api/start       — launches llama-server subprocesses
-        ├── /api/status      — health check (pings /v1/models every 4s)
-        └── /ws/logs         — streams llama-server stdout in real time
-```
+Issues and PRs welcome.
 
-Frontend: pure HTML + TypeScript, no framework, no build step for end users. Compiled `app.js` is committed.
-
----
-
-## License
-
-Apache 2.0 — use, modify, distribute freely.
+- **Something broke** → open an issue with the log console output
+- **Better patcher prompt** → open a PR, I'm actively iterating on it
+- **Model that works well / badly** → share in issues
 
 ---
 
@@ -150,9 +183,9 @@ Apache 2.0 — use, modify, distribute freely.
 
 ---
 
-## Contributing
+## License
 
-Issues and PRs welcome. If you run it and something breaks, open an issue with the log console output. If you have a better prompt for the patcher, open a PR — I'm actively iterating on it.
+Apache 2.0 — use, modify, distribute freely.
 
 ---
 
