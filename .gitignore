@@ -1,0 +1,17 @@
+# Portable runtime — downloaded on first run, never committed
+python/
+bin/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
+
+# Virtual environments (if someone uses one manually)
+venv/
+.venv/
+
+# OS junk
+.DS_Store
+Thumbs.db
+desktop.ini

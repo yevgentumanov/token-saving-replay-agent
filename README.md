@@ -43,7 +43,38 @@ Typical savings on a 30-step technical task: **70–90% of micro-fix tokens**.
 
 ---
 
-## How to run
+## Быстрый старт (Windows) — zero-install
+
+> Нужны только Git и двойной клик. Python, llama-server и зависимости скачиваются автоматически.
+
+```bat
+git clone https://github.com/yevgentumanov/token-saving-replay-agent.git
+cd token-saving-replay-agent
+start.bat
+```
+
+**Что происходит при первом запуске:**
+
+| Шаг | Действие |
+|-----|---------|
+| 1 | Скачивается portable Python 3.12 (~7 MB) в папку `./python/` |
+| 2 | Устанавливаются зависимости из `requirements.txt` |
+| 3 | Скачивается `llama-server.exe` (Windows x64, Vulkan/AVX2) в `./bin/` |
+| 4 | Открывается диалог выбора файла — выберите вашу большую `.gguf` модель |
+| 5 | Открывается диалог — выберите маленькую `.gguf` модель для патчера |
+| 6 | Запускается FastAPI и открывается браузер на `http://localhost:7860` |
+
+<!-- screenshot: окно терминала с прогресс-логом трёх шагов настройки -->
+
+**Повторный запуск:** `start.bat` сразу открывает браузер — переустановки нет.
+
+**Требования:** Windows 10/11, ~500 MB свободного места, интернет при первом запуске.
+
+**Не нужно:** Python в системе, права администратора, Docker, npm.
+
+---
+
+## How to run (manual / cross-platform)
 
 ```bash
 git clone https://github.com/yevgentumanov/token-saving-replay-agent.git
