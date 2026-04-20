@@ -1,4 +1,4 @@
-# Operational Mode
+# Token Saving Replay Agent
 
 **The obvious fix everyone keeps ducking under.**
 
@@ -9,7 +9,7 @@ When you use a big LLM (Claude, GPT-4o, Grok, local 70B) to walk through a multi
 3. It fixes step 3. Step 7 breaks. Repeat.
 4. 15,000 tokens burned. Context polluted. You're tired.
 
-**Operational Mode breaks the chain.**
+**Token Saving Replay Agent breaks the chain.**
 
 A tiny local model (~1-3B) sits next to the big one. It handles micro-fixes in real time — shell translations, path corrections, missing sudo, version mismatches — without touching the main model's context. The big model stays clean and focused on the hard thinking.
 
@@ -33,8 +33,8 @@ Every response is parsed into addressable blocks — `step-1`, `step-2`, `code-b
 
 ## Token savings
 
-| Scenario | Without Operational Mode | With Operational Mode |
-|----------|--------------------------|----------------------|
+| Scenario | Without Token Saving Replay Agent | With Token Saving Replay Agent |
+|----------|-----------------------------------|--------------------------------|
 | Wrong shell in 1 block | Re-send full context (~5k tokens) | Patcher call (~300 tokens) |
 | Error on step 5 of 10 | Re-explain + full context (~8k tokens) | Error popup (~400 tokens) |
 | 3 env mismatches in one reply | 3× full re-sends | 3× parallel patcher calls |
@@ -46,8 +46,8 @@ Typical savings on a 30-step technical task: **70–90% of micro-fix tokens**.
 ## How to run
 
 ```bash
-git clone https://github.com/euusome/operational-mode.git
-cd operational-mode
+git clone https://github.com/yevgentumanov/token-saving-replay-agent.git
+cd token-saving-replay-agent
 pip install -r requirements.txt
 python main.py
 ```
@@ -72,7 +72,7 @@ For detailed setup, see **[INSTRUCTIONS.md](./INSTRUCTIONS.md)**.
 **Patcher Model (Model B)** — small and fast:
 - Qwen2.5-1.5B, SmolLM2-1.7B, Llama-3.2-1B, Qwen3-1.7B
 - Speed is the priority, not capability — it only handles one block at a time
-- **Thinking models (Qwen3, DeepSeek-R1, etc.) work fine** — Operational Mode sends `/no_think` automatically to skip chain-of-thought and get instant answers. If the model ignores it, answers are extracted from `reasoning_content` as a fallback.
+- **Thinking models (Qwen3, DeepSeek-R1, etc.) work fine** — Token Saving Replay Agent sends `/no_think` automatically to skip chain-of-thought and get instant answers. If the model ignores it, answers are extracted from `reasoning_content` as a fallback.
 
 Both run locally via llama.cpp. No API keys. No cloud.
 
@@ -84,7 +84,7 @@ Both run locally via llama.cpp. No API keys. No cloud.
 |-------|---------|--------|
 | 0 | Basic launcher — GUI, llama-server subprocess, health check | ✅ Done |
 | 1 | Dual model launcher — Main + Patcher, independent health checks | ✅ Done |
-| 2 | Operational Mode Core — Chat, Profile, Inline Patcher, Error Popup | ✅ Done |
+| 2 | Core — Chat, Profile, Inline Patcher, Error Popup | ✅ Done |
 | — | Thinking model support — `/no_think` + `reasoning_content` fallback | ✅ Done |
 | 2.5 | Consolidation Pass — summarise patches before next big-model call | 🔜 Next |
 | 3+ | Full Step Extractor, escalation formatter, installers | 📋 Planned |
