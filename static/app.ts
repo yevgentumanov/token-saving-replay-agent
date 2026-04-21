@@ -414,6 +414,7 @@ let stepCounter  = 0;
 // ===== Phase 2.5 — Consolidation Pass state =====
 let currentTurnPatches: PatchEntry[]  = [];
 let lastConsolidationSummary: string | null = null;
+let consolidationDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 
 function loadHistory(): void {
   try {
@@ -618,6 +619,27 @@ function applyPatch(wrap: HTMLDivElement, newContent: string, badgeText: string,
     if (idx !== -1) currentTurnPatches.splice(idx, 1);
     badge.remove();
   });
+
+  // Error Popup patches don't go through the inline patcher Promise chain, so trigger
+  // Consolidation Pass separately with a short debounce (handles rapid multi-apply).
+  if (source === "error_popup") scheduleConsolidationAfterErrorPopup(wrap);
+}
+
+// Debounced Consolidation Pass trigger for Error Popup applies.
+// Finds the parent .msg element (the assistant turn div) by walking up the DOM.
+function scheduleConsolidationAfterErrorPopup(wrap: HTMLDivElement): void {
+  const consolidationOn = consolidationEnabledToggle?.checked ?? false;
+  const patcherReady = lastStatus?.b.running && lastStatus.b.healthy && usePatcher.checked;
+  if (!consolidationOn || !patcherReady) return;
+
+  if (consolidationDebounceTimer !== null) clearTimeout(consolidationDebounceTimer);
+  consolidationDebounceTimer = setTimeout(() => {
+    consolidationDebounceTimer = null;
+    const asstDiv = wrap.closest(".msg") as HTMLDivElement | null;
+    if (!asstDiv || currentTurnPatches.length === 0) return;
+    console.log(`[consolidation] error-popup trigger: ${currentTurnPatches.length} patch(es)`);
+    runConsolidationPass(asstDiv, currentTurnPatches.slice());
+  }, 400);
 }
 
 // ===== Consolidation Pass (Phase 2.5) =====
@@ -889,6 +911,7 @@ async function sendMessage(): Promise<void> {
 
     // Reset patch tracking for this turn before rendering
     currentTurnPatches = [];
+    if (consolidationDebounceTimer !== null) { clearTimeout(consolidationDebounceTimer); consolidationDebounceTimer = null; }
     const patchPromises = renderAssistantContent(asstContent, accumulated);
     persistHistory();
 
