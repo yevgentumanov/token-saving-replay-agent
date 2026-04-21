@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from consolidation import PatchRecord, run_consolidation_pass
 from llm_clients import make_client
 
 BASE_DIR = Path(__file__).parent
@@ -422,6 +423,28 @@ async def chat_patcher(request: Request):
         return result
     except Exception as e:
         raise HTTPException(500, f"Patcher request failed: {e}")
+
+
+class ConsolidationRequestBody(BaseModel):
+    patches: list[PatchRecord]
+
+
+@app.post("/api/consolidation")
+async def api_consolidation(req: ConsolidationRequestBody):
+    """
+    Phase 2.5 — Consolidation Pass.
+    Called by the frontend after all inline patches for a turn are done.
+    Asks Model B to produce a structured JSON summary; returns it to the frontend
+    which then injects it into the next main-model system prompt.
+    """
+    if not _model_ready("b"):
+        raise HTTPException(400, "Patcher model (B) is not running — cannot run Consolidation Pass")
+    if not req.patches:
+        return {"changed_steps": [], "summary": "", "state_delta": "", "patch_count": 0}
+    result = await run_consolidation_pass(state.client_b, req.patches)
+    if result is None:
+        raise HTTPException(500, "Consolidation Pass failed — check patcher logs")
+    return result.model_dump()
 
 
 @app.websocket("/ws/logs")

@@ -401,6 +401,69 @@
     }
     .btn-problem-bar button:hover { background: #2d2510; }
 
+    /* ==== CONSOLIDATION PASS (Phase 2.5) ==== */
+    .consolidation-toggle-row {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-top: 8px;
+      font-size: 12px;
+    }
+    .consolidation-toggle-row label {
+      display: flex;
+      align-items: center;
+      gap: 5px;
+      cursor: pointer;
+      color: #888;
+      margin: 0;
+      font-size: 12px;
+    }
+    .consolidation-toggle-row label:hover { color: #aaa; }
+    .consolidation-toggle-row input { width: 13px; height: 13px; accent-color: #818cf8; cursor: pointer; }
+    .consolidation-hint { color: #555; font-size: 11px; }
+
+    .consolidation-badge {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      padding: 6px 12px;
+      background: #1a1a35;
+      border: 1px solid #2d2d60;
+      border-radius: 6px;
+      margin-top: 8px;
+      font-size: 12px;
+      color: #818cf8;
+    }
+    .consolidation-icon { font-size: 13px; flex-shrink: 0; }
+    .consolidation-text { flex: 1; }
+    .consolidation-details-btn {
+      background: transparent;
+      border: 1px solid #818cf855;
+      color: #818cf8;
+      padding: 2px 8px;
+      border-radius: 3px;
+      cursor: pointer;
+      font-size: 11px;
+      transition: background .15s;
+      flex-shrink: 0;
+    }
+    .consolidation-details-btn:hover { background: #818cf820; }
+    .consolidation-details {
+      background: #11112a;
+      border: 1px solid #2a2a55;
+      border-radius: 5px;
+      padding: 10px 14px;
+      font-size: 12px;
+      color: #a5b4fc;
+      margin-top: 4px;
+      line-height: 1.55;
+    }
+    .consolidation-summary-text { margin-bottom: 6px; }
+    .consolidation-details ul { margin: 4px 0 4px 16px; }
+    .consolidation-details li { margin-bottom: 3px; }
+    .consolidation-details code { background: #1e1e40; padding: 1px 5px; border-radius: 3px; font-size: 11px; }
+    .consolidation-state-delta { color: #7dd3fc; font-size: 11px; margin-top: 6px; }
+
     /* ==== PROFILE TAB ==== */
     .profile-intro {
       color: #aaa;
@@ -586,6 +649,13 @@
         <textarea id="chatInput" placeholder="Ask Model A… (Shift+Enter for newline)" rows="2"></textarea>
         <button id="chatSend">Send</button>
         <button id="chatClear" title="Clear conversation">Clear</button>
+      </div>
+      <div class="consolidation-toggle-row" id="consolidationToggleRow">
+        <label>
+          <input type="checkbox" id="consolidationEnabled" checked>
+          Consolidation Pass
+        </label>
+        <span class="consolidation-hint">— patcher summarizes applied changes for main model context</span>
       </div>
     </div>
   </section>

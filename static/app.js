@@ -112,7 +112,6 @@ async function loadConfigFallback() {
     if (c.model_b_provider)    providerB.value    = c.model_b_provider;
     if (c.model_b_api_key)     apiKeyB.value      = c.model_b_api_key;
     if (c.model_b_cloud_model) customModelB.value = c.model_b_cloud_model;
-    // Re-run provider UI after loading config
     handleProviderChange("A");
     handleProviderChange("B");
   } catch (_) {}
@@ -166,6 +165,9 @@ function syncPatcherBlock() {
   blockB.classList.toggle("disabled", !usePatcher.checked);
   statusB.textContent = usePatcher.checked ? "Stopped" : "Disabled";
   dotB.className = "dot dot-gray";
+  // Hide Consolidation Pass toggle when patcher is fully disabled
+  const consolidationRow = $("consolidationToggleRow");
+  if (consolidationRow) consolidationRow.style.display = usePatcher.checked ? "" : "none";
 }
 usePatcher.addEventListener("change", () => { syncPatcherBlock(); saveLauncherSettings(); });
 
@@ -336,12 +338,12 @@ function loadProfile() {
 
 function saveProfile() {
   const p = {
-    shell:              $("prof-shell").value,
-    os:                 $("prof-os").value,
-    python_version:     $("prof-python").value.trim(),
-    package_manager:    $("prof-pkg").value,
-    naming_convention:  $("prof-naming").value.trim(),
-    custom_rules:       $("prof-rules").value.trim(),
+    shell:             $("prof-shell").value,
+    os:                $("prof-os").value,
+    python_version:    $("prof-python").value.trim(),
+    package_manager:   $("prof-pkg").value,
+    naming_convention: $("prof-naming").value.trim(),
+    custom_rules:      $("prof-rules").value.trim(),
   };
   localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
   const saved = $("profileSaved");
@@ -351,12 +353,12 @@ function saveProfile() {
 
 function hydrateProfileForm() {
   const p = loadProfile();
-  $("prof-shell").value = p.shell;
-  $("prof-os").value = p.os;
-  $("prof-python").value = p.python_version;
-  $("prof-pkg").value = p.package_manager;
-  $("prof-naming").value = p.naming_convention;
-  $("prof-rules").value = p.custom_rules;
+  $("prof-shell").value   = p.shell;
+  $("prof-os").value      = p.os;
+  $("prof-python").value  = p.python_version;
+  $("prof-pkg").value     = p.package_manager;
+  $("prof-naming").value  = p.naming_convention;
+  $("prof-rules").value   = p.custom_rules;
 }
 
 $("profileSave").addEventListener("click", saveProfile);
@@ -384,17 +386,22 @@ function profileToSystemPrompt(p) {
 // ========================================================================
 // ==================== CHAT ==============================================
 // ========================================================================
-const chatMessages = $("chatMessages");
-const chatInput    = $("chatInput");
-const chatSend     = $("chatSend");
-const chatClear    = $("chatClear");
-const chatBanner   = $("chatBanner");
+const chatMessages               = $("chatMessages");
+const chatInput                  = $("chatInput");
+const chatSend                   = $("chatSend");
+const chatClear                  = $("chatClear");
+const chatBanner                 = $("chatBanner");
+const consolidationEnabledToggle = $("consolidationEnabled");   // Phase 2.5
 
 const HISTORY_KEY = "chatHistory";
 let chatHistoryArr = [];
-let streaming = false;
-let blockCounter = 0;
-let stepCounter  = 0;
+let streaming      = false;
+let blockCounter   = 0;
+let stepCounter    = 0;
+
+// ===== Phase 2.5 — Consolidation Pass state =====
+let currentTurnPatches      = [];   // patch records collected during the current turn
+let lastConsolidationSummary = null; // injected into next main-model system prompt
 
 function loadHistory() {
   try {
@@ -444,12 +451,12 @@ function renderMessage(msg) {
 // ===== Step Extractor + code block wrapping =====
 const COMMAND_LANGS = new Set(["bash","sh","cmd","powershell","ps1","pwsh","batch","bat","zsh","fish","shell","console"]);
 
+// Returns array of inline-patch Promises so sendMessage() can await them before consolidating.
 function renderAssistantContent(container, markdown) {
   const html = DOMPurify.sanitize(marked.parse(markdown));
   const tmp = document.createElement("div");
   tmp.innerHTML = html;
 
-  // Assign step-N to headers and ordered-list items
   tmp.querySelectorAll("h1, h2, h3, h4").forEach(el => {
     el.id = "step-" + (++stepCounter);
   });
@@ -457,7 +464,6 @@ function renderAssistantContent(container, markdown) {
     el.id = "step-" + (++stepCounter);
   });
 
-  // Wrap <pre><code> blocks with our header + action bar
   tmp.querySelectorAll("pre > code").forEach(codeEl => {
     const pre = codeEl.parentElement;
     const blockId = "code-block-" + (++blockCounter);
@@ -468,7 +474,7 @@ function renderAssistantContent(container, markdown) {
     const wrap = document.createElement("div");
     wrap.className = "code-block-wrap";
     wrap.dataset.blockId = blockId;
-    wrap.dataset.lang = lang;
+    wrap.dataset.lang    = lang;
     wrap.dataset.original = content;
 
     const header = document.createElement("div");
@@ -481,8 +487,8 @@ function renderAssistantContent(container, markdown) {
       "</span>";
 
     wrap.appendChild(header);
-    pre.replaceWith(wrap);        // detach pre, put wrap in its place
-    wrap.appendChild(pre);        // now move pre inside wrap
+    pre.replaceWith(wrap);
+    wrap.appendChild(pre);
 
     const problemBar = document.createElement("div");
     problemBar.className = "btn-problem-bar";
@@ -493,24 +499,26 @@ function renderAssistantContent(container, markdown) {
       navigator.clipboard.writeText(codeEl.textContent || "");
     });
     header.querySelector(".btn-problem").addEventListener("click", () => openErrorModal(wrap));
-    problemBar.querySelector("button").addEventListener("click", () => openErrorModal(wrap));
+    problemBar.querySelector("button").addEventListener("click",   () => openErrorModal(wrap));
   });
 
   container.appendChild(tmp);
 
-  // Trigger inline patcher for command blocks
   const profile = loadProfile();
   const patcherReady = lastStatus && lastStatus.b.running && lastStatus.b.healthy && usePatcher.checked;
   console.log("[step-extractor] steps=" + stepCounter + " blocks=" + blockCounter + " patcherReady=" + patcherReady);
+
+  const patchPromises = [];
   if (patcherReady) {
     container.querySelectorAll(".code-block-wrap").forEach(wrap => {
       const lang = wrap.dataset.lang || "";
       console.log("[step-extractor] block " + wrap.dataset.blockId + " lang=\"" + lang + "\" isCommand=" + COMMAND_LANGS.has(lang));
-      if (COMMAND_LANGS.has(lang)) runInlinePatch(wrap, profile);
+      if (COMMAND_LANGS.has(lang)) patchPromises.push(runInlinePatch(wrap, profile));
     });
   } else {
     console.log("[step-extractor] patcher skipped \u2014 B not healthy or disabled");
   }
+  return patchPromises;
 }
 
 // ===== Patcher helpers =====
@@ -531,7 +539,7 @@ function extractPatcherReply(data) {
 // ===== Inline Patcher =====
 async function runInlinePatch(wrap, profile) {
   const original = wrap.dataset.original || "";
-  const lang = wrap.dataset.lang || "";
+  const lang     = wrap.dataset.lang     || "";
   const prompt = [
     "You are a shell command patcher. The user's environment is:",
     profileToSystemPrompt(profile),
@@ -552,7 +560,7 @@ async function runInlinePatch(wrap, profile) {
       body: JSON.stringify({
         messages: [
           { role: "system", content: "/no_think" },
-          { role: "user", content: prompt },
+          { role: "user",   content: prompt },
         ],
         temperature: 0.1, max_tokens: 1024,
       }),
@@ -569,16 +577,27 @@ async function runInlinePatch(wrap, profile) {
     }
     const cleaned = reply.replace(/^```\w*\n?/, "").replace(/\n?```$/, "").trim();
     if (cleaned.length < 3) { console.warn("[patcher] inline: reply too short, skipping"); return; }
-    applyPatch(wrap, cleaned, "auto-translated \u2192 " + profile.shell);
+    applyPatch(wrap, cleaned, "auto-translated \u2192 " + profile.shell, "inline");
   } catch (e) {
     console.error("[patcher] inline error:", e);
   }
 }
 
-function applyPatch(wrap, newContent, badgeText) {
-  const pre = wrap.querySelector("pre");
+// applyPatch — mutates block content, records patch for Consolidation Pass, attaches undo badge.
+function applyPatch(wrap, newContent, badgeText, source) {
+  source = source || "inline";
+  const pre  = wrap.querySelector("pre");
   const code = pre.querySelector("code");
   code.textContent = newContent;
+
+  // Record for Phase 2.5 Consolidation Pass
+  currentTurnPatches.push({
+    block_id: wrap.dataset.blockId || "",
+    lang:     wrap.dataset.lang    || "",
+    original: wrap.dataset.original || "",
+    patched:  newContent,
+    source:   source,
+  });
 
   const existingBadge = wrap.querySelector(".patch-badge");
   if (existingBadge) existingBadge.remove();
@@ -588,8 +607,98 @@ function applyPatch(wrap, newContent, badgeText) {
   wrap.appendChild(badge);
   badge.querySelector(".btn-undo").addEventListener("click", () => {
     code.textContent = wrap.dataset.original || "";
+    // Remove the undo'd patch from the consolidation record
+    const idx = currentTurnPatches.findIndex(p => p.block_id === (wrap.dataset.blockId || ""));
+    if (idx !== -1) currentTurnPatches.splice(idx, 1);
     badge.remove();
   });
+}
+
+// ===== Consolidation Pass (Phase 2.5) =====
+
+function escHtml(s) {
+  return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function buildConsolidationContext(data) {
+  const lines = [
+    "[Consolidation Pass \u2014 " + data.patch_count + " patch(es) applied to the previous response]",
+    "",
+    data.summary || "",
+  ];
+  if (data.state_delta) lines.push("", "Environment notes: " + data.state_delta);
+  if (data.changed_steps && data.changed_steps.length > 0) {
+    lines.push("", "Changed blocks:");
+    data.changed_steps.forEach(s => {
+      lines.push("  \u2022 " + s.step_id + ": " + s.reason);
+    });
+  }
+  return lines.join("\n");
+}
+
+async function runConsolidationPass(asstDiv, patches) {
+  const patcherReady = lastStatus && lastStatus.b.running && lastStatus.b.healthy && usePatcher.checked;
+  if (!patcherReady) { console.log("[consolidation] skipped \u2014 patcher not ready"); return; }
+  if (!patches || patches.length === 0) return;
+
+  console.log("[consolidation] starting pass for " + patches.length + " patch(es)");
+  try {
+    const r = await fetch("/api/consolidation", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ patches }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      console.warn("[consolidation] server error:", r.status, err.detail || err);
+      return;
+    }
+    const data = await r.json();
+    console.log("[consolidation] result:", data);
+    if (!data.summary) return;
+
+    // Store for injection into the next sendMessage() system prompt
+    lastConsolidationSummary = buildConsolidationContext(data);
+
+    // ── Badge ──────────────────────────────────────────────────────────────
+    const badge = document.createElement("div");
+    badge.className = "consolidation-badge";
+    badge.innerHTML =
+      "<span class=\"consolidation-icon\">\u26a1</span>" +
+      "<span class=\"consolidation-text\">Consolidation Pass: " + patches.length + " change(s) summarized</span>" +
+      "<button class=\"consolidation-details-btn\">Details</button>";
+    asstDiv.appendChild(badge);
+
+    // ── Details panel (hidden, toggled by button) ──────────────────────────
+    const details = document.createElement("div");
+    details.className = "consolidation-details";
+    details.style.display = "none";
+
+    let html = "<div class=\"consolidation-summary-text\">" + escHtml(data.summary) + "</div>";
+    if (data.changed_steps && data.changed_steps.length > 0) {
+      html += "<ul>";
+      data.changed_steps.forEach(s => {
+        html += "<li><code>" + escHtml(s.step_id) + "</code>: " + escHtml(s.reason) + "</li>";
+      });
+      html += "</ul>";
+    }
+    if (data.state_delta) {
+      html += "<div class=\"consolidation-state-delta\">Env: " + escHtml(data.state_delta) + "</div>";
+    }
+    details.innerHTML = html;
+    asstDiv.appendChild(details);
+
+    badge.querySelector(".consolidation-details-btn").addEventListener("click", () => {
+      details.style.display = details.style.display === "none" ? "block" : "none";
+    });
+
+    const logMsg = "Consolidation Pass: " + patches.length + " change(s) summarized";
+    console.log("[consolidation] " + logMsg);
+    addLog(logMsg, "log-info");
+
+  } catch (e) {
+    console.error("[consolidation] error:", e);
+  }
 }
 
 // ===== Error Popup =====
@@ -629,7 +738,7 @@ errPaste.addEventListener("click", async () => {
 errSubmit.addEventListener("click", async () => {
   if (!errActiveWrap || !errStderr.value.trim()) return;
   const codeEl = errActiveWrap.querySelector("code");
-  const code = codeEl ? codeEl.textContent : "";
+  const code   = codeEl ? codeEl.textContent : "";
   const profile = loadProfile();
   const prompt = [
     "User environment:",
@@ -660,7 +769,7 @@ errSubmit.addEventListener("click", async () => {
       body: JSON.stringify({
         messages: [
           { role: "system", content: "/no_think" },
-          { role: "user", content: prompt },
+          { role: "user",   content: prompt },
         ],
         temperature: 0.2, max_tokens: 1500,
       }),
@@ -687,8 +796,9 @@ errSubmit.addEventListener("click", async () => {
       "<div style=\"margin-top:8px\"><button class=\"err-btn-apply\">\u2713 Apply to block</button></div>";
     box.querySelector("pre").textContent = fix;
     errFixContainer.appendChild(box);
+    // Pass "error_popup" source so consolidation can distinguish manual fixes
     box.querySelector(".err-btn-apply").addEventListener("click", () => {
-      if (errActiveWrap) applyPatch(errActiveWrap, fix, "patched from error");
+      if (errActiveWrap) applyPatch(errActiveWrap, fix, "patched from error", "error_popup");
       closeErrorModal();
     });
   } catch (e) {
@@ -715,20 +825,28 @@ async function sendMessage() {
 
   const asstMsg = { role: "assistant", content: "" };
   chatHistoryArr.push(asstMsg);
-  const asstDiv = renderMessage(asstMsg);
+  const asstDiv     = renderMessage(asstMsg);
   const asstContent = asstDiv.querySelector(".msg-content");
   asstContent.textContent = "\u2026";
 
   streaming = true;
   chatSend.disabled = true;
 
-  const profile = loadProfile();
-  const systemPrompt = profileToSystemPrompt(profile);
+  const profile     = loadProfile();
+  const systemParts = [profileToSystemPrompt(profile)];
+
+  // Phase 2.5: inject Consolidation Pass summary from the previous turn
+  const consolidationOn = consolidationEnabledToggle && consolidationEnabledToggle.checked;
+  if (consolidationOn && lastConsolidationSummary) {
+    systemParts.push("\n\n" + lastConsolidationSummary);
+    lastConsolidationSummary = null;
+    console.log("[consolidation] injected summary into system prompt");
+  }
 
   const body = {
     messages: [
-      { role: "system", content: systemPrompt },
-      ...chatHistoryArr.filter(m => m.role !== "system").slice(0, -1),  // exclude the empty assistant placeholder
+      { role: "system", content: systemParts.join("") },
+      ...chatHistoryArr.filter(m => m.role !== "system").slice(0, -1),
     ],
     stream: true,
     temperature: 0.7,
@@ -745,9 +863,9 @@ async function sendMessage() {
       throw new Error(errText || ("HTTP " + r.status));
     }
 
-    const reader = r.body.getReader();
+    const reader  = r.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = "";
+    let buffer      = "";
     let accumulated = "";
 
     while (true) {
@@ -763,24 +881,40 @@ async function sendMessage() {
         const payload = t.slice(5).trim();
         if (payload === "[DONE]") continue;
         try {
-          const obj = JSON.parse(payload);
+          const obj   = JSON.parse(payload);
           const delta = obj && obj.choices && obj.choices[0] && obj.choices[0].delta && obj.choices[0].delta.content;
           if (delta) {
             accumulated += delta;
             asstContent.textContent = accumulated;
-            chatMessages.scrollTop = chatMessages.scrollHeight;
+            chatMessages.scrollTop  = chatMessages.scrollHeight;
           }
-        } catch (_) { /* ignore */ }
+        } catch (_) { /* ignore partial JSON */ }
       }
     }
 
-    asstMsg.content = accumulated;
+    asstMsg.content    = accumulated;
     asstContent.innerHTML = "";
-    renderAssistantContent(asstContent, accumulated);
+
+    // Reset patch tracking for this turn, then render (inline patches fire async inside)
+    currentTurnPatches = [];
+    const patchPromises = renderAssistantContent(asstContent, accumulated);
     persistHistory();
+
+    // Phase 2.5: after all inline patches settle, run Consolidation Pass
+    if (consolidationOn && patchPromises.length > 0) {
+      Promise.allSettled(patchPromises).then(() => {
+        if (currentTurnPatches.length > 0) {
+          console.log("[consolidation] all inline patches done (" + currentTurnPatches.length + " change(s)), starting consolidation");
+          runConsolidationPass(asstDiv, currentTurnPatches.slice());
+        } else {
+          console.log("[consolidation] all patches returned UNCHANGED, skipping");
+        }
+      });
+    }
+
   } catch (e) {
     asstContent.innerHTML = "<span style=\"color:#fca5a5\">Error: " + (e.message || e) + "</span>";
-    chatHistoryArr.pop();  // remove failed assistant msg
+    chatHistoryArr.pop();  // remove failed assistant placeholder
   } finally {
     streaming = false;
     chatSend.disabled = false;
@@ -795,6 +929,7 @@ chatInput.addEventListener("keydown", (e) => {
 chatClear.addEventListener("click", () => {
   if (!confirm("Clear conversation?")) return;
   chatHistoryArr = []; blockCounter = 0; stepCounter = 0;
+  currentTurnPatches = []; lastConsolidationSummary = null;
   chatMessages.innerHTML = "";
   sessionStorage.removeItem(HISTORY_KEY);
 });
@@ -812,3 +947,12 @@ pollStatus();
 setInterval(pollStatus, 3000);
 handleProviderChange("A");
 handleProviderChange("B");
+
+// Persist Consolidation Pass toggle across sessions
+if (consolidationEnabledToggle) {
+  const saved = localStorage.getItem("consolidationEnabled");
+  if (saved !== null) consolidationEnabledToggle.checked = saved === "true";
+  consolidationEnabledToggle.addEventListener("change", () => {
+    localStorage.setItem("consolidationEnabled", String(consolidationEnabledToggle.checked));
+  });
+}

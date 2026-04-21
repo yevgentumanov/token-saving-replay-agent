@@ -16,11 +16,34 @@ interface EnvProfile {
 
 interface ChatMessage { role: "user" | "assistant" | "system"; content: string; }
 
+// Phase 2.5 — Consolidation Pass types
+interface PatchEntry {
+  block_id: string;
+  lang: string;
+  original: string;
+  patched: string;
+  source: string;  // "inline" | "error_popup"
+}
+
+interface ConsolidationChangedStep {
+  step_id: string;
+  original: string;
+  patched: string;
+  reason: string;
+}
+
+interface ConsolidationResponse {
+  changed_steps: ConsolidationChangedStep[];
+  summary: string;
+  state_delta: string;
+  patch_count: number;
+}
+
 // ===== Helpers =====
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
 // ========================================================================
-// ============ LAUNCHER TAB (preserved from Phase 1) =====================
+// ============ LAUNCHER TAB ==============================================
 // ========================================================================
 const pathA      = $<HTMLInputElement>("pathA");
 const argsA      = $<HTMLInputElement>("argsA");
@@ -123,7 +146,6 @@ async function loadConfigFallback(): Promise<void> {
     if (c.model_b_provider)    providerB.value          = c.model_b_provider;
     if (c.model_b_api_key)     apiKeyB.value            = c.model_b_api_key;
     if (c.model_b_cloud_model) customModelB.value       = c.model_b_cloud_model;
-    // Re-run provider UI after loading config
     handleProviderChange("A");
     handleProviderChange("B");
   } catch (_) {}
@@ -175,6 +197,8 @@ function syncPatcherBlock(): void {
   blockB.classList.toggle("disabled", !usePatcher.checked);
   statusB.textContent = usePatcher.checked ? "Stopped" : "Disabled";
   dotB.className = "dot dot-gray";
+  const consolidationRow = $<HTMLDivElement>("consolidationToggleRow");
+  if (consolidationRow) consolidationRow.style.display = usePatcher.checked ? "" : "none";
 }
 usePatcher.addEventListener("change", () => { syncPatcherBlock(); saveLauncherSettings(); });
 
@@ -245,24 +269,16 @@ startBtn.addEventListener("click", async () => {
 
   const body: Record<string, unknown> = {
     model_a: {
-      path: pathA.value.trim(),
-      args: argsA.value.trim(),
-      port: Number(portA.value),
-      provider: providerA.value,
-      api_key: apiKeyA.value.trim(),
-      cloud_model: cloudModelA,
+      path: pathA.value.trim(), args: argsA.value.trim(), port: Number(portA.value),
+      provider: providerA.value, api_key: apiKeyA.value.trim(), cloud_model: cloudModelA,
     },
     host: hostInput.value.trim(),
     llama_server_path: llamaPath.value.trim(),
   };
   if (usePatcher.checked && (pathB.value.trim() || providerB.value !== "local")) {
     body.model_b = {
-      path: pathB.value.trim(),
-      args: argsB.value.trim(),
-      port: Number(portB.value),
-      provider: providerB.value,
-      api_key: apiKeyB.value.trim(),
-      cloud_model: cloudModelB,
+      path: pathB.value.trim(), args: argsB.value.trim(), port: Number(portB.value),
+      provider: providerB.value, api_key: apiKeyB.value.trim(), cloud_model: cloudModelB,
     };
   }
   try {
@@ -334,12 +350,12 @@ function loadProfile(): EnvProfile {
 
 function saveProfile(): void {
   const p: EnvProfile = {
-    shell:              ($<HTMLSelectElement>("prof-shell")).value,
-    os:                 ($<HTMLSelectElement>("prof-os")).value,
-    python_version:     ($<HTMLInputElement>("prof-python")).value.trim(),
-    package_manager:    ($<HTMLSelectElement>("prof-pkg")).value,
-    naming_convention:  ($<HTMLInputElement>("prof-naming")).value.trim(),
-    custom_rules:       ($<HTMLTextAreaElement>("prof-rules")).value.trim(),
+    shell:             ($<HTMLSelectElement>("prof-shell")).value,
+    os:                ($<HTMLSelectElement>("prof-os")).value,
+    python_version:    ($<HTMLInputElement>("prof-python")).value.trim(),
+    package_manager:   ($<HTMLSelectElement>("prof-pkg")).value,
+    naming_convention: ($<HTMLInputElement>("prof-naming")).value.trim(),
+    custom_rules:      ($<HTMLTextAreaElement>("prof-rules")).value.trim(),
   };
   localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
   const saved = $<HTMLSpanElement>("profileSaved");
@@ -349,11 +365,11 @@ function saveProfile(): void {
 
 function hydrateProfileForm(): void {
   const p = loadProfile();
-  ($<HTMLSelectElement>("prof-shell")).value = p.shell;
-  ($<HTMLSelectElement>("prof-os")).value = p.os;
-  ($<HTMLInputElement>("prof-python")).value = p.python_version;
-  ($<HTMLSelectElement>("prof-pkg")).value = p.package_manager;
-  ($<HTMLInputElement>("prof-naming")).value = p.naming_convention;
+  ($<HTMLSelectElement>("prof-shell")).value   = p.shell;
+  ($<HTMLSelectElement>("prof-os")).value      = p.os;
+  ($<HTMLInputElement>("prof-python")).value   = p.python_version;
+  ($<HTMLSelectElement>("prof-pkg")).value     = p.package_manager;
+  ($<HTMLInputElement>("prof-naming")).value   = p.naming_convention;
   ($<HTMLTextAreaElement>("prof-rules")).value = p.custom_rules;
 }
 
@@ -382,17 +398,22 @@ function profileToSystemPrompt(p: EnvProfile): string {
 // ========================================================================
 // ==================== CHAT ==============================================
 // ========================================================================
-const chatMessages = $<HTMLDivElement>("chatMessages");
-const chatInput    = $<HTMLTextAreaElement>("chatInput");
-const chatSend     = $<HTMLButtonElement>("chatSend");
-const chatClear    = $<HTMLButtonElement>("chatClear");
-const chatBanner   = $<HTMLDivElement>("chatBanner");
+const chatMessages               = $<HTMLDivElement>("chatMessages");
+const chatInput                  = $<HTMLTextAreaElement>("chatInput");
+const chatSend                   = $<HTMLButtonElement>("chatSend");
+const chatClear                  = $<HTMLButtonElement>("chatClear");
+const chatBanner                 = $<HTMLDivElement>("chatBanner");
+const consolidationEnabledToggle = $<HTMLInputElement>("consolidationEnabled");  // Phase 2.5
 
 const HISTORY_KEY = "chatHistory";
 let chatHistoryArr: ChatMessage[] = [];
-let streaming = false;
+let streaming    = false;
 let blockCounter = 0;
 let stepCounter  = 0;
+
+// ===== Phase 2.5 — Consolidation Pass state =====
+let currentTurnPatches: PatchEntry[]  = [];
+let lastConsolidationSummary: string | null = null;
 
 function loadHistory(): void {
   try {
@@ -442,12 +463,12 @@ function renderMessage(msg: ChatMessage): HTMLDivElement {
 // ===== Step Extractor + code block wrapping =====
 const COMMAND_LANGS = new Set(["bash","sh","cmd","powershell","ps1","pwsh","batch","bat","zsh","fish","shell","console"]);
 
-function renderAssistantContent(container: HTMLElement, markdown: string): void {
+// Returns inline-patch Promises so sendMessage() can await them before running Consolidation Pass.
+function renderAssistantContent(container: HTMLElement, markdown: string): Promise<void>[] {
   const html = DOMPurify.sanitize(marked.parse(markdown));
   const tmp = document.createElement("div");
   tmp.innerHTML = html;
 
-  // Assign step-N to headers and ordered-list items
   tmp.querySelectorAll("h1, h2, h3, h4").forEach(el => {
     (el as HTMLElement).id = `step-${++stepCounter}`;
   });
@@ -455,7 +476,6 @@ function renderAssistantContent(container: HTMLElement, markdown: string): void 
     (el as HTMLElement).id = `step-${++stepCounter}`;
   });
 
-  // Wrap <pre><code> blocks with our header + action bar
   tmp.querySelectorAll("pre > code").forEach(codeEl => {
     const pre = codeEl.parentElement as HTMLPreElement;
     const blockId = `code-block-${++blockCounter}`;
@@ -465,8 +485,8 @@ function renderAssistantContent(container: HTMLElement, markdown: string): void 
 
     const wrap = document.createElement("div");
     wrap.className = "code-block-wrap";
-    wrap.dataset.blockId = blockId;
-    wrap.dataset.lang = lang;
+    wrap.dataset.blockId  = blockId;
+    wrap.dataset.lang     = lang;
     wrap.dataset.original = content;
 
     const header = document.createElement("div");
@@ -478,8 +498,8 @@ function renderAssistantContent(container: HTMLElement, markdown: string): void 
       </span>`;
 
     wrap.appendChild(header);
-    pre.replaceWith(wrap);        // detach pre, put wrap in its place
-    wrap.appendChild(pre);        // now move pre inside wrap
+    pre.replaceWith(wrap);
+    wrap.appendChild(pre);
 
     const problemBar = document.createElement("div");
     problemBar.className = "btn-problem-bar";
@@ -490,41 +510,39 @@ function renderAssistantContent(container: HTMLElement, markdown: string): void 
       navigator.clipboard.writeText(codeEl.textContent || "");
     });
     (header.querySelector(".btn-problem") as HTMLButtonElement).addEventListener("click", () => openErrorModal(wrap));
-    (problemBar.querySelector("button") as HTMLButtonElement).addEventListener("click", () => openErrorModal(wrap));
+    (problemBar.querySelector("button") as HTMLButtonElement).addEventListener("click",   () => openErrorModal(wrap));
   });
 
   container.appendChild(tmp);
 
-  // Trigger inline patcher for command blocks
   const profile = loadProfile();
   const patcherReady = lastStatus?.b.running && lastStatus.b.healthy && usePatcher.checked;
   console.log(`[step-extractor] steps=${stepCounter} blocks=${blockCounter} patcherReady=${patcherReady}`);
+
+  const patchPromises: Promise<void>[] = [];
   if (patcherReady) {
     container.querySelectorAll<HTMLDivElement>(".code-block-wrap").forEach(wrap => {
       const lang = wrap.dataset.lang || "";
       console.log(`[step-extractor] block ${wrap.dataset.blockId} lang="${lang}" isCommand=${COMMAND_LANGS.has(lang)}`);
-      if (COMMAND_LANGS.has(lang)) runInlinePatch(wrap, profile);
+      if (COMMAND_LANGS.has(lang)) patchPromises.push(runInlinePatch(wrap, profile));
     });
   } else {
     console.log("[step-extractor] patcher skipped — B not healthy or disabled");
   }
+  return patchPromises;
 }
 
 // ===== Patcher helpers =====
 function extractPatcherReply(data: any): string {
   const msg = data?.choices?.[0]?.message;
   if (!msg) return "";
-  // Prefer content; fall back to reasoning_content for thinking models
   const content = (msg.content || "").trim();
   if (content) return content;
-  // reasoning_content fallback: extract last code block or last non-empty line
   const reasoning = (msg.reasoning_content || "").trim();
   if (!reasoning) return "";
   console.warn("[patcher] content empty, extracting from reasoning_content");
-  // Try to find the last ```...``` block in the reasoning
   const codeBlocks = [...reasoning.matchAll(/```[\w]*\n?([\s\S]*?)```/g)];
   if (codeBlocks.length) return codeBlocks[codeBlocks.length - 1][1].trim();
-  // Fallback: last non-empty line
   const lines = reasoning.split("\n").map((l: string) => l.trim()).filter(Boolean);
   return lines[lines.length - 1] || "";
 }
@@ -532,7 +550,7 @@ function extractPatcherReply(data: any): string {
 // ===== Inline Patcher =====
 async function runInlinePatch(wrap: HTMLDivElement, profile: EnvProfile): Promise<void> {
   const original = wrap.dataset.original || "";
-  const lang = wrap.dataset.lang || "";
+  const lang     = wrap.dataset.lang     || "";
   const prompt = [
     `You are a shell command patcher. The user's environment is:`,
     profileToSystemPrompt(profile),
@@ -552,7 +570,7 @@ async function runInlinePatch(wrap: HTMLDivElement, profile: EnvProfile): Promis
       body: JSON.stringify({
         messages: [
           { role: "system", content: "/no_think" },
-          { role: "user", content: prompt },
+          { role: "user",   content: prompt },
         ],
         temperature: 0.1, max_tokens: 1024,
       }),
@@ -568,16 +586,26 @@ async function runInlinePatch(wrap: HTMLDivElement, profile: EnvProfile): Promis
     }
     const cleaned = reply.replace(/^```\w*\n?/, "").replace(/\n?```$/, "").trim();
     if (cleaned.length < 3) { console.warn("[patcher] inline: reply too short, skipping"); return; }
-    applyPatch(wrap, cleaned, `auto-translated → ${profile.shell}`);
+    applyPatch(wrap, cleaned, `auto-translated → ${profile.shell}`, "inline");
   } catch (e) {
     console.error("[patcher] inline error:", e);
   }
 }
 
-function applyPatch(wrap: HTMLDivElement, newContent: string, badgeText: string): void {
-  const pre = wrap.querySelector("pre") as HTMLPreElement;
+// applyPatch — mutates block content, records the patch for Consolidation Pass, attaches undo badge.
+function applyPatch(wrap: HTMLDivElement, newContent: string, badgeText: string, source = "inline"): void {
+  const pre  = wrap.querySelector("pre") as HTMLPreElement;
   const code = pre.querySelector("code") as HTMLElement;
   code.textContent = newContent;
+
+  // Record for Phase 2.5 Consolidation Pass
+  currentTurnPatches.push({
+    block_id: wrap.dataset.blockId  || "",
+    lang:     wrap.dataset.lang     || "",
+    original: wrap.dataset.original || "",
+    patched:  newContent,
+    source,
+  });
 
   wrap.querySelector(".patch-badge")?.remove();
   const badge = document.createElement("div");
@@ -586,18 +614,104 @@ function applyPatch(wrap: HTMLDivElement, newContent: string, badgeText: string)
   wrap.appendChild(badge);
   (badge.querySelector(".btn-undo") as HTMLButtonElement).addEventListener("click", () => {
     code.textContent = wrap.dataset.original || "";
+    const idx = currentTurnPatches.findIndex(p => p.block_id === (wrap.dataset.blockId || ""));
+    if (idx !== -1) currentTurnPatches.splice(idx, 1);
     badge.remove();
   });
 }
 
+// ===== Consolidation Pass (Phase 2.5) =====
+
+function escHtml(s: string): string {
+  return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
+}
+
+function buildConsolidationContext(data: ConsolidationResponse): string {
+  const lines = [
+    `[Consolidation Pass — ${data.patch_count} patch(es) applied to the previous response]`,
+    "",
+    data.summary,
+  ];
+  if (data.state_delta) lines.push("", `Environment notes: ${data.state_delta}`);
+  if (data.changed_steps.length > 0) {
+    lines.push("", "Changed blocks:");
+    data.changed_steps.forEach(s => lines.push(`  • ${s.step_id}: ${s.reason}`));
+  }
+  return lines.join("\n");
+}
+
+async function runConsolidationPass(asstDiv: HTMLDivElement, patches: PatchEntry[]): Promise<void> {
+  const patcherReady = lastStatus?.b.running && lastStatus.b.healthy && usePatcher.checked;
+  if (!patcherReady) { console.log("[consolidation] skipped — patcher not ready"); return; }
+  if (!patches.length) return;
+
+  console.log(`[consolidation] starting pass for ${patches.length} patch(es)`);
+  try {
+    const r = await fetch("/api/consolidation", {
+      method: "POST", headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ patches }),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      console.warn("[consolidation] server error:", r.status, (err as any).detail || err);
+      return;
+    }
+    const data: ConsolidationResponse = await r.json();
+    console.log("[consolidation] result:", data);
+    if (!data.summary) return;
+
+    // Store for injection into the next sendMessage() system prompt
+    lastConsolidationSummary = buildConsolidationContext(data);
+
+    // ── Badge ──────────────────────────────────────────────────────────────
+    const badge = document.createElement("div");
+    badge.className = "consolidation-badge";
+    badge.innerHTML =
+      `<span class="consolidation-icon">⚡</span>` +
+      `<span class="consolidation-text">Consolidation Pass: ${patches.length} change(s) summarized</span>` +
+      `<button class="consolidation-details-btn">Details</button>`;
+    asstDiv.appendChild(badge);
+
+    // ── Details panel ──────────────────────────────────────────────────────
+    const details = document.createElement("div");
+    details.className = "consolidation-details";
+    details.style.display = "none";
+
+    let html = `<div class="consolidation-summary-text">${escHtml(data.summary)}</div>`;
+    if (data.changed_steps.length > 0) {
+      html += "<ul>";
+      data.changed_steps.forEach(s => {
+        html += `<li><code>${escHtml(s.step_id)}</code>: ${escHtml(s.reason)}</li>`;
+      });
+      html += "</ul>";
+    }
+    if (data.state_delta) {
+      html += `<div class="consolidation-state-delta">Env: ${escHtml(data.state_delta)}</div>`;
+    }
+    details.innerHTML = html;
+    asstDiv.appendChild(details);
+
+    (badge.querySelector(".consolidation-details-btn") as HTMLButtonElement).addEventListener("click", () => {
+      details.style.display = details.style.display === "none" ? "block" : "none";
+    });
+
+    const logMsg = `Consolidation Pass: ${patches.length} change(s) summarized`;
+    console.log(`[consolidation] ${logMsg}`);
+    addLog(logMsg, "log-info");
+
+  } catch (e) {
+    console.error("[consolidation] error:", e);
+  }
+}
+
 // ===== Error Popup =====
-const errModal      = $<HTMLDivElement>("errModal");
-const errBlockEl    = $<HTMLPreElement>("errBlock");
-const errStderr     = $<HTMLTextAreaElement>("errStderr");
+const errModal        = $<HTMLDivElement>("errModal");
+const errBlockEl      = $<HTMLPreElement>("errBlock");
+const errStderr       = $<HTMLTextAreaElement>("errStderr");
 const errFixContainer = $<HTMLDivElement>("errFixContainer");
-const errSubmit     = $<HTMLButtonElement>("errSubmit");
-const errCancel     = $<HTMLButtonElement>("errCancel");
-const errPaste      = $<HTMLButtonElement>("errPaste");
+const errSubmit       = $<HTMLButtonElement>("errSubmit");
+const errCancel       = $<HTMLButtonElement>("errCancel");
+const errPaste        = $<HTMLButtonElement>("errPaste");
 let errActiveWrap: HTMLDivElement | null = null;
 
 function openErrorModal(wrap: HTMLDivElement): void {
@@ -623,9 +737,9 @@ errPaste.addEventListener("click", async () => {
 
 errSubmit.addEventListener("click", async () => {
   if (!errActiveWrap || !errStderr.value.trim()) return;
-  const code = errActiveWrap.querySelector("code")?.textContent || "";
+  const code    = errActiveWrap.querySelector("code")?.textContent || "";
   const profile = loadProfile();
-  const prompt = [
+  const prompt  = [
     `User environment:`,
     profileToSystemPrompt(profile),
     ``,
@@ -653,7 +767,7 @@ errSubmit.addEventListener("click", async () => {
       body: JSON.stringify({
         messages: [
           { role: "system", content: "/no_think" },
-          { role: "user", content: prompt },
+          { role: "user",   content: prompt },
         ],
         temperature: 0.2, max_tokens: 1500,
       }),
@@ -678,8 +792,9 @@ errSubmit.addEventListener("click", async () => {
       <div style="margin-top:8px"><button class="err-btn-apply">✓ Apply to block</button></div>`;
     (box.querySelector("pre") as HTMLElement).textContent = fix;
     errFixContainer.appendChild(box);
+    // Pass "error_popup" source so consolidation record distinguishes manual fixes
     (box.querySelector(".err-btn-apply") as HTMLButtonElement).addEventListener("click", () => {
-      if (errActiveWrap) applyPatch(errActiveWrap, fix, "patched from error");
+      if (errActiveWrap) applyPatch(errActiveWrap, fix, "patched from error", "error_popup");
       closeErrorModal();
     });
   } catch (e: any) {
@@ -694,10 +809,7 @@ errSubmit.addEventListener("click", async () => {
 async function sendMessage(): Promise<void> {
   const text = chatInput.value.trim();
   if (!text || streaming) return;
-  if (!lastStatus?.a.running || !lastStatus.a.healthy) {
-    checkChatReadiness();
-    return;
-  }
+  if (!lastStatus?.a.running || !lastStatus.a.healthy) { checkChatReadiness(); return; }
 
   chatInput.value = "";
   const userMsg: ChatMessage = { role: "user", content: text };
@@ -706,20 +818,28 @@ async function sendMessage(): Promise<void> {
 
   const asstMsg: ChatMessage = { role: "assistant", content: "" };
   chatHistoryArr.push(asstMsg);
-  const asstDiv = renderMessage(asstMsg);
+  const asstDiv     = renderMessage(asstMsg);
   const asstContent = asstDiv.querySelector(".msg-content") as HTMLDivElement;
   asstContent.textContent = "…";
 
   streaming = true;
   chatSend.disabled = true;
 
-  const profile = loadProfile();
-  const systemPrompt = profileToSystemPrompt(profile);
+  const profile     = loadProfile();
+  const systemParts = [profileToSystemPrompt(profile)];
+
+  // Phase 2.5: inject Consolidation Pass summary from the previous turn
+  const consolidationOn = consolidationEnabledToggle?.checked ?? false;
+  if (consolidationOn && lastConsolidationSummary) {
+    systemParts.push("\n\n" + lastConsolidationSummary);
+    lastConsolidationSummary = null;
+    console.log("[consolidation] injected summary into system prompt");
+  }
 
   const body = {
     messages: [
-      { role: "system", content: systemPrompt },
-      ...chatHistoryArr.filter(m => m.role !== "system").slice(0, -1),  // exclude the empty assistant placeholder
+      { role: "system", content: systemParts.join("") },
+      ...chatHistoryArr.filter(m => m.role !== "system").slice(0, -1),
     ],
     stream: true,
     temperature: 0.7,
@@ -735,9 +855,9 @@ async function sendMessage(): Promise<void> {
       throw new Error(errText || `HTTP ${r.status}`);
     }
 
-    const reader = r.body.getReader();
+    const reader  = r.body.getReader();
     const decoder = new TextDecoder();
-    let buffer = "";
+    let buffer      = "";
     let accumulated = "";
 
     while (true) {
@@ -753,24 +873,40 @@ async function sendMessage(): Promise<void> {
         const payload = t.slice(5).trim();
         if (payload === "[DONE]") continue;
         try {
-          const obj = JSON.parse(payload);
+          const obj   = JSON.parse(payload);
           const delta = obj?.choices?.[0]?.delta?.content;
           if (delta) {
             accumulated += delta;
             asstContent.textContent = accumulated;
-            chatMessages.scrollTop = chatMessages.scrollHeight;
+            chatMessages.scrollTop  = chatMessages.scrollHeight;
           }
-        } catch { /* ignore */ }
+        } catch { /* ignore partial JSON */ }
       }
     }
 
-    asstMsg.content = accumulated;
+    asstMsg.content       = accumulated;
     asstContent.innerHTML = "";
-    renderAssistantContent(asstContent, accumulated);
+
+    // Reset patch tracking for this turn before rendering
+    currentTurnPatches = [];
+    const patchPromises = renderAssistantContent(asstContent, accumulated);
     persistHistory();
+
+    // Phase 2.5: once all inline patches settle, run Consolidation Pass if enabled
+    if (consolidationOn && patchPromises.length > 0) {
+      Promise.allSettled(patchPromises).then(() => {
+        if (currentTurnPatches.length > 0) {
+          console.log(`[consolidation] all inline patches done (${currentTurnPatches.length} change(s)), starting consolidation`);
+          runConsolidationPass(asstDiv, currentTurnPatches.slice());
+        } else {
+          console.log("[consolidation] all patches returned UNCHANGED, skipping");
+        }
+      });
+    }
+
   } catch (e: any) {
     asstContent.innerHTML = `<span style="color:#fca5a5">Error: ${e.message || e}</span>`;
-    chatHistoryArr.pop();  // remove failed assistant msg
+    chatHistoryArr.pop();
   } finally {
     streaming = false;
     chatSend.disabled = false;
@@ -785,6 +921,7 @@ chatInput.addEventListener("keydown", (e) => {
 chatClear.addEventListener("click", () => {
   if (!confirm("Clear conversation?")) return;
   chatHistoryArr = []; blockCounter = 0; stepCounter = 0;
+  currentTurnPatches = []; lastConsolidationSummary = null;
   chatMessages.innerHTML = "";
   sessionStorage.removeItem(HISTORY_KEY);
 });
@@ -802,3 +939,12 @@ pollStatus();
 setInterval(pollStatus, 3000);
 handleProviderChange("A");
 handleProviderChange("B");
+
+// Persist Consolidation Pass toggle state across sessions
+if (consolidationEnabledToggle) {
+  const saved = localStorage.getItem("consolidationEnabled");
+  if (saved !== null) consolidationEnabledToggle.checked = saved === "true";
+  consolidationEnabledToggle.addEventListener("change", () => {
+    localStorage.setItem("consolidationEnabled", String(consolidationEnabledToggle.checked));
+  });
+}
