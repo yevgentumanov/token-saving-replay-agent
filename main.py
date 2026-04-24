@@ -204,7 +204,9 @@ async def startup():
     state.log_queue = asyncio.Queue(maxsize=1000)
     asyncio.create_task(_health("healthy_a", "proc_a", "port_a", "provider_a", "client_a"))
     asyncio.create_task(_health("healthy_b", "proc_b", "port_b", "provider_b", "client_b"))
-    threading.Timer(1.2, lambda: webbrowser.open("http://localhost:7860")).start()
+    import os
+    if not os.environ.get("LLAMA_NO_BROWSER"):
+        threading.Timer(1.2, lambda: webbrowser.open("http://localhost:7860")).start()
 
 
 @app.get("/")

@@ -53,7 +53,7 @@ export class BackendManager {
 
     this.proc = cp.spawn(pythonPath, [mainPy], {
       cwd: this.repoRoot,
-      env: { ...process.env },
+      env: { ...process.env, LLAMA_NO_BROWSER: "1" },
     });
 
     this.proc.stdout?.on("data", (chunk: Buffer) => {
@@ -64,9 +64,17 @@ export class BackendManager {
       this.outputChannel.append(chunk.toString());
     });
 
+    const startTime = Date.now();
     this.proc.on("exit", (code) => {
       this.outputChannel.appendLine(`[BackendManager] Process exited with code ${code}`);
       this._stopStatusPoll();
+      // If it crashed within 8 seconds of starting, surface an error notification
+      if (code !== 0 && Date.now() - startTime < 8000) {
+        vscode.window.showErrorMessage(
+          `Llama backend crashed (exit ${code}). Check "Llama Backend" output for details.`,
+          "Show Output"
+        ).then((choice) => { if (choice === "Show Output") { this.outputChannel.show(); } });
+      }
     });
 
     this._startStatusPoll();
@@ -74,16 +82,15 @@ export class BackendManager {
 
   stop(): void {
     this._stopStatusPoll();
-    if (this.proc && !this.proc.killed) {
+    const proc = this.proc;   // capture before nulling to avoid race
+    this.proc = null;
+    if (proc && !proc.killed) {
       this.outputChannel.appendLine("[BackendManager] Stopping backend...");
       this._httpPost("/api/stop", {}).catch(() => {});
       setTimeout(() => {
-        if (this.proc && !this.proc.killed) {
-          this.proc.kill();
-        }
+        if (!proc.killed) { proc.kill(); }
       }, 2000);
     }
-    this.proc = null;
   }
 
   dispose(): void {

@@ -63,6 +63,8 @@ export class ChatPanel {
     http-equiv="Content-Security-Policy"
     content="default-src 'none';
              frame-src ${backendUrl};
+             script-src 'unsafe-inline';
+             connect-src ${backendUrl};
              style-src 'unsafe-inline';"
   />
   <style>
