@@ -21,6 +21,7 @@ from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import consolidation
 from consolidation import PatchRecord, run_consolidation_pass
 from llm_clients import make_client
 
@@ -429,22 +430,56 @@ class ConsolidationRequestBody(BaseModel):
     patches: list[PatchRecord]
 
 
+class ConsolidationConfigBody(BaseModel):
+    patch_threshold: Optional[int] = None
+    token_threshold: Optional[int] = None
+
+
 @app.post("/api/consolidation")
 async def api_consolidation(req: ConsolidationRequestBody):
     """
     Phase 2.5 — Consolidation Pass.
     Called by the frontend after all inline patches for a turn are done.
-    Asks Model B to produce a structured JSON summary; returns it to the frontend
-    which then injects it into the next main-model system prompt.
+    Automatically selects full vs lightweight mode based on smart thresholds,
+    then returns the result for injection into the next main-model system prompt.
     """
     if not _model_ready("b"):
         raise HTTPException(400, "Patcher model (B) is not running — cannot run Consolidation Pass")
     if not req.patches:
-        return {"changed_steps": [], "summary": "", "state_delta": "", "patch_count": 0}
+        return {"changed_steps": [], "summary": "", "state_delta": "", "patch_count": 0, "mode": "lightweight"}
     result = await run_consolidation_pass(state.client_b, req.patches)
     if result is None:
         raise HTTPException(500, "Consolidation Pass failed — check patcher logs")
     return result.model_dump()
+
+
+@app.get("/api/consolidation/config")
+async def api_consolidation_config_get():
+    """Return current smart-threshold values."""
+    return {
+        "patch_threshold": consolidation.CONSOLIDATION_PATCH_THRESHOLD,
+        "token_threshold": consolidation.CONSOLIDATION_TOKEN_THRESHOLD,
+    }
+
+
+@app.post("/api/consolidation/config")
+async def api_consolidation_config_set(body: ConsolidationConfigBody):
+    """
+    Update smart-threshold values at runtime (no restart needed).
+    Only the supplied fields are changed.
+    """
+    if body.patch_threshold is not None:
+        if body.patch_threshold < 1:
+            raise HTTPException(400, "patch_threshold must be >= 1")
+        consolidation.CONSOLIDATION_PATCH_THRESHOLD = body.patch_threshold
+    if body.token_threshold is not None:
+        if body.token_threshold < 1:
+            raise HTTPException(400, "token_threshold must be >= 1")
+        consolidation.CONSOLIDATION_TOKEN_THRESHOLD = body.token_threshold
+    return {
+        "patch_threshold": consolidation.CONSOLIDATION_PATCH_THRESHOLD,
+        "token_threshold": consolidation.CONSOLIDATION_TOKEN_THRESHOLD,
+    }
 
 
 @app.websocket("/ws/logs")

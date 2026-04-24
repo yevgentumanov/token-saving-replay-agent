@@ -172,9 +172,13 @@ function syncPatcherBlock() {
     blockB.classList.toggle("disabled", !usePatcher.checked);
     statusB.textContent = usePatcher.checked ? "Stopped" : "Disabled";
     dotB.className = "dot dot-gray";
+    const show = usePatcher.checked ? "" : "none";
     const consolidationRow = $("consolidationToggleRow");
+    const consolidationCtrls = $("consolidationControlsRow");
     if (consolidationRow)
-        consolidationRow.style.display = usePatcher.checked ? "" : "none";
+        consolidationRow.style.display = show;
+    if (consolidationCtrls)
+        consolidationCtrls.style.display = show;
 }
 usePatcher.addEventListener("change", () => { syncPatcherBlock(); saveLauncherSettings(); });
 async function browseFile(type, target, logMsg) {
@@ -411,6 +415,12 @@ let stepCounter = 0;
 let currentTurnPatches = [];
 let lastConsolidationSummary = null;
 let consolidationDebounceTimer = null;
+// Versioned history: each successful consolidation appends a ConsolidationEntry
+let consolidationHistory = [];
+let consolidationVersionCounter = 0;
+// Smart-threshold values — loaded from backend at init, updated via UI
+let consolidationPatchThreshold = 8;
+let consolidationTokenThreshold = 12000;
 function loadHistory() {
     try {
         const raw = sessionStorage.getItem(HISTORY_KEY);
@@ -641,9 +651,15 @@ function scheduleConsolidationAfterErrorPopup(wrap) {
 function escHtml(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
+// Rough token estimate — mirrors consolidation.py estimate_tokens()
+function estimateTokens(patches) {
+    return patches.reduce((sum, p) => sum + Math.floor((p.original.length + p.patched.length) / 4), 0);
+}
+// Build the string that gets injected into the next system prompt for a single entry
 function buildConsolidationContext(data) {
+    const modeLabel = data.mode === "full" ? "Consolidation Pass" : "Lightweight Patch Summary";
     const lines = [
-        `[Consolidation Pass — ${data.patch_count} patch(es) applied to the previous response]`,
+        `[${modeLabel} — ${data.patch_count} patch(es) applied to the previous response]`,
         "",
         data.summary,
     ];
@@ -655,6 +671,48 @@ function buildConsolidationContext(data) {
     }
     return lines.join("\n");
 }
+// Update the "Undo Last Consolidation" button state based on history length
+function syncUndoBtn() {
+    const btn = $("undoConsolidationBtn");
+    if (btn)
+        btn.disabled = consolidationHistory.length === 0;
+}
+// Roll back the last N consolidation entries, optionally triggered by the model.
+// Injects a rollback notice into the next system prompt so Main-model is informed.
+function rollbackConsolidation(n, triggeredBy) {
+    if (consolidationHistory.length === 0)
+        return;
+    const toRemove = Math.min(n, consolidationHistory.length);
+    const removed = consolidationHistory.slice(-toRemove);
+    const firstV = removed[0].version;
+    const lastV = removed[removed.length - 1].version;
+    consolidationHistory.splice(-toRemove, toRemove);
+    const newStart = consolidationHistory.length > 0
+        ? consolidationHistory[consolidationHistory.length - 1].version
+        : 0;
+    // Build rollback notice — always injected into next turn's system prompt
+    const notice = `[CONSOLIDATION UPDATE: Blocks v${firstV} to v${lastV} have been rolled back by ${triggeredBy}. Current consolidation history now starts from v${newStart}.]`;
+    // Combine notice with the current top of history (if any), or use notice alone
+    if (consolidationHistory.length > 0) {
+        const top = consolidationHistory[consolidationHistory.length - 1];
+        lastConsolidationSummary = notice + "\n\n" + top.builtSummary;
+    }
+    else {
+        lastConsolidationSummary = notice;
+    }
+    const logMsg = `Consolidation rollback: removed v${firstV}–v${lastV} (triggered by ${triggeredBy})`;
+    addLog(logMsg, "log-info");
+    console.log(`[consolidation] ${logMsg}`);
+    syncUndoBtn();
+}
+// Check if the model's response contains a ROLLBACK_CONSOLIDATION:N command
+function checkForRollbackCommand(text) {
+    const m = text.match(/ROLLBACK_CONSOLIDATION:(\d+)/i);
+    if (!m)
+        return null;
+    const n = parseInt(m[1], 10);
+    return n > 0 ? n : null;
+}
 async function runConsolidationPass(asstDiv, patches) {
     const patcherReady = lastStatus?.b.running && lastStatus.b.healthy && usePatcher.checked;
     if (!patcherReady) {
@@ -663,7 +721,8 @@ async function runConsolidationPass(asstDiv, patches) {
     }
     if (!patches.length)
         return;
-    console.log(`[consolidation] starting pass for ${patches.length} patch(es)`);
+    const estTokens = estimateTokens(patches);
+    console.log(`[consolidation] starting pass: ${patches.length} patch(es), ~${estTokens} tokens`);
     try {
         const r = await fetch("/api/consolidation", {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -678,14 +737,26 @@ async function runConsolidationPass(asstDiv, patches) {
         console.log("[consolidation] result:", data);
         if (!data.summary)
             return;
-        // Store for injection into the next sendMessage() system prompt
-        lastConsolidationSummary = buildConsolidationContext(data);
+        // Build the injection string and store it as a versioned history entry
+        const builtSummary = buildConsolidationContext(data);
+        consolidationVersionCounter += 1;
+        const entry = {
+            version: consolidationVersionCounter,
+            timestamp: Date.now(),
+            mode: data.mode ?? "full",
+            data,
+            builtSummary,
+        };
+        consolidationHistory.push(entry);
+        lastConsolidationSummary = builtSummary;
+        syncUndoBtn();
         // ── Badge ──────────────────────────────────────────────────────────────
+        const modeLabel = data.mode === "lightweight" ? "Lightweight Summary" : "Consolidation Pass";
         const badge = document.createElement("div");
         badge.className = "consolidation-badge";
         badge.innerHTML =
             `<span class="consolidation-icon">⚡</span>` +
-                `<span class="consolidation-text">Consolidation Pass: ${patches.length} change(s) summarized</span>` +
+                `<span class="consolidation-text">v${consolidationVersionCounter} · ${modeLabel}: ${patches.length} change(s) summarized</span>` +
                 `<button class="consolidation-details-btn">Details</button>`;
         asstDiv.appendChild(badge);
         // ── Details panel ──────────────────────────────────────────────────────
@@ -708,7 +779,7 @@ async function runConsolidationPass(asstDiv, patches) {
         badge.querySelector(".consolidation-details-btn").addEventListener("click", () => {
             details.style.display = details.style.display === "none" ? "block" : "none";
         });
-        const logMsg = `Consolidation Pass: ${patches.length} change(s) summarized`;
+        const logMsg = `${modeLabel} v${consolidationVersionCounter}: ${patches.length} change(s) summarized`;
         console.log(`[consolidation] ${logMsg}`);
         addLog(logMsg, "log-info");
     }
@@ -899,6 +970,14 @@ async function sendMessage() {
         }
         asstMsg.content = accumulated;
         asstContent.innerHTML = "";
+        // Check if model issued a rollback command before rendering
+        if (consolidationOn) {
+            const rollbackN = checkForRollbackCommand(accumulated);
+            if (rollbackN !== null) {
+                console.log(`[consolidation] model issued ROLLBACK_CONSOLIDATION:${rollbackN}`);
+                rollbackConsolidation(rollbackN, "model");
+            }
+        }
         // Reset patch tracking for this turn before rendering
         currentTurnPatches = [];
         if (consolidationDebounceTimer !== null) {
@@ -907,11 +986,13 @@ async function sendMessage() {
         }
         const patchPromises = renderAssistantContent(asstContent, accumulated);
         persistHistory();
-        // Phase 2.5: once all inline patches settle, run Consolidation Pass if enabled
+        // Phase 2.5: once all inline patches settle, run Consolidation Pass if enabled.
+        // Backend decides full vs lightweight based on smart thresholds.
         if (consolidationOn && patchPromises.length > 0) {
             Promise.allSettled(patchPromises).then(() => {
                 if (currentTurnPatches.length > 0) {
-                    console.log(`[consolidation] all inline patches done (${currentTurnPatches.length} change(s)), starting consolidation`);
+                    const est = estimateTokens(currentTurnPatches);
+                    console.log(`[consolidation] all inline patches done (${currentTurnPatches.length} patch(es), ~${est} tokens), requesting summary`);
                     runConsolidationPass(asstDiv, currentTurnPatches.slice());
                 }
                 else {
@@ -945,8 +1026,11 @@ chatClear.addEventListener("click", () => {
     stepCounter = 0;
     currentTurnPatches = [];
     lastConsolidationSummary = null;
+    consolidationHistory = [];
+    consolidationVersionCounter = 0;
     chatMessages.innerHTML = "";
     sessionStorage.removeItem(HISTORY_KEY);
+    syncUndoBtn();
 });
 // ========================================================================
 // ==================== INIT =============================================
@@ -969,4 +1053,63 @@ if (consolidationEnabledToggle) {
     consolidationEnabledToggle.addEventListener("change", () => {
         localStorage.setItem("consolidationEnabled", String(consolidationEnabledToggle.checked));
     });
+}
+// ── Consolidation: load thresholds from backend, wire up threshold inputs and Undo button ──
+(async () => {
+    try {
+        const r = await fetch("/api/consolidation/config");
+        if (r.ok) {
+            const cfg = await r.json();
+            consolidationPatchThreshold = cfg.patch_threshold ?? 8;
+            consolidationTokenThreshold = cfg.token_threshold ?? 12000;
+            const patchInput = $("consolidationPatchThreshold");
+            const tokenInput = $("consolidationTokenThreshold");
+            if (patchInput)
+                patchInput.value = String(consolidationPatchThreshold);
+            if (tokenInput)
+                tokenInput.value = String(consolidationTokenThreshold);
+        }
+    }
+    catch (_) { /* backend not running yet — use defaults */ }
+})();
+// Save threshold changes to backend and localStorage
+async function saveConsolidationThresholds() {
+    const patchInput = $("consolidationPatchThreshold");
+    const tokenInput = $("consolidationTokenThreshold");
+    const patchVal = parseInt(patchInput?.value || "8", 10);
+    const tokenVal = parseInt(tokenInput?.value || "12000", 10);
+    if (isNaN(patchVal) || isNaN(tokenVal) || patchVal < 1 || tokenVal < 1)
+        return;
+    consolidationPatchThreshold = patchVal;
+    consolidationTokenThreshold = tokenVal;
+    localStorage.setItem("consolidationPatchThreshold", String(patchVal));
+    localStorage.setItem("consolidationTokenThreshold", String(tokenVal));
+    try {
+        await fetch("/api/consolidation/config", {
+            method: "POST", headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ patch_threshold: patchVal, token_threshold: tokenVal }),
+        });
+    }
+    catch (_) { /* ignore if backend not running */ }
+}
+const consolidationPatchInput = $("consolidationPatchThreshold");
+const consolidationTokenInput = $("consolidationTokenThreshold");
+if (consolidationPatchInput)
+    consolidationPatchInput.addEventListener("change", saveConsolidationThresholds);
+if (consolidationTokenInput)
+    consolidationTokenInput.addEventListener("change", saveConsolidationThresholds);
+// Restore thresholds from localStorage if saved (overrides backend defaults before fetch completes)
+{
+    const sp = localStorage.getItem("consolidationPatchThreshold");
+    const st = localStorage.getItem("consolidationTokenThreshold");
+    if (sp)
+        consolidationPatchThreshold = parseInt(sp, 10);
+    if (st)
+        consolidationTokenThreshold = parseInt(st, 10);
+}
+// "Undo Last Consolidation" button
+const undoConsolidationBtn = $("undoConsolidationBtn");
+if (undoConsolidationBtn) {
+    undoConsolidationBtn.disabled = true;
+    undoConsolidationBtn.addEventListener("click", () => rollbackConsolidation(1, "user"));
 }

@@ -421,6 +421,24 @@
     .consolidation-toggle-row label:hover { color: #aaa; }
     .consolidation-toggle-row input { width: 13px; height: 13px; accent-color: #818cf8; cursor: pointer; }
     .consolidation-hint { color: #555; font-size: 11px; }
+    .consolidation-controls {
+      display: flex; align-items: center; gap: 10px;
+      margin-top: 5px; flex-wrap: wrap;
+    }
+    .consolidation-threshold-group {
+      display: flex; align-items: center; gap: 5px; color: #555; font-size: 11px;
+    }
+    .consolidation-threshold-group input[type="number"] {
+      width: 58px; padding: 2px 5px; background: #1a1a2e; border: 1px solid #333;
+      border-radius: 3px; color: #aaa; font-size: 11px; text-align: center;
+    }
+    .btn-undo-consolidation {
+      padding: 2px 9px; background: transparent; border: 1px solid #555;
+      color: #888; border-radius: 3px; cursor: pointer; font-size: 11px;
+      transition: border-color .15s, color .15s;
+    }
+    .btn-undo-consolidation:hover:not(:disabled) { border-color: #818cf8; color: #818cf8; }
+    .btn-undo-consolidation:disabled { opacity: 0.35; cursor: default; }
 
     .consolidation-badge {
       display: flex;
@@ -656,6 +674,17 @@
           Consolidation Pass
         </label>
         <span class="consolidation-hint">— patcher summarizes applied changes for main model context</span>
+      </div>
+      <div class="consolidation-controls" id="consolidationControlsRow">
+        <div class="consolidation-threshold-group">
+          Patch&nbsp;threshold:
+          <input type="number" id="consolidationPatchThreshold" value="8" min="1" max="100" title="Run full Consolidation Pass when at least this many patches are applied">
+        </div>
+        <div class="consolidation-threshold-group">
+          Token&nbsp;threshold:
+          <input type="number" id="consolidationTokenThreshold" value="12000" min="1" max="200000" step="1000" title="Run full Consolidation Pass when estimated token count exceeds this value">
+        </div>
+        <button id="undoConsolidationBtn" class="btn-undo-consolidation" disabled title="Undo the last consolidation block">↶ Undo Last Consolidation</button>
       </div>
     </div>
   </section>

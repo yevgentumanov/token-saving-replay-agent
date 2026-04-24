@@ -15,3 +15,6 @@ venv/
 .DS_Store
 Thumbs.db
 desktop.ini
+
+# Internal project docs (not for public repo)
+.replay/internal/
