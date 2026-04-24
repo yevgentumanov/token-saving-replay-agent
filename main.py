@@ -24,6 +24,8 @@ from pydantic import BaseModel
 
 import consolidation
 from consolidation import PatchRecord, run_consolidation_pass
+import keeper
+from keeper import KeeperSession, run_keeper_review, keeper_session_init
 from llm_clients import make_client
 
 BASE_DIR = Path(__file__).parent
@@ -91,6 +93,9 @@ class State:
 
 
 state = State()
+
+# Concept Keeper v-1 — one session per server process
+keeper_session = KeeperSession()
 
 
 def _read_stream(stream, label: str, vram_flag: str, proc_ref: list):
@@ -493,6 +498,53 @@ async def api_consolidation_config_set(body: ConsolidationConfigBody):
         "patch_threshold": consolidation.CONSOLIDATION_PATCH_THRESHOLD,
         "token_threshold": consolidation.CONSOLIDATION_TOKEN_THRESHOLD,
     }
+
+
+# ── Concept Keeper v-1 ────────────────────────────────────────────────────────
+
+class KeeperReviewRequest(BaseModel):
+    request: str
+
+
+@app.get("/api/keeper/status")
+async def api_keeper_status():
+    """Return the current Keeper session state (turn count, drift, last reset, etc.)."""
+    return keeper.get_status(keeper_session).model_dump()
+
+
+@app.post("/api/keeper/review")
+async def api_keeper_review(req: KeeperReviewRequest):
+    """
+    Submit a proposed change or decision for Concept Keeper review.
+    Uses Model B. Returns APPROVED / REJECTED / WARNING / HARD_RESET verdict.
+    """
+    if not _model_ready("b"):
+        raise HTTPException(400, "Patcher model (B) is not running — Keeper requires Model B")
+    if not req.request.strip():
+        raise HTTPException(400, "request must not be empty")
+
+    # Lazy init: initialize the session on first review if not already done
+    if not keeper_session.concept_md_loaded:
+        await keeper_session_init(state.client_b, keeper_session)
+
+    verdict = await run_keeper_review(state.client_b, keeper_session, req.request)
+
+    # If Keeper issued a Hard Reset, re-init so it's ready for the next review
+    if verdict.status == "HARD_RESET":
+        await keeper_session_init(state.client_b, keeper_session)
+
+    return verdict.model_dump()
+
+
+@app.post("/api/keeper/reset")
+async def api_keeper_reset():
+    """Force a Keeper Hard Reset — re-reads CONCEPT.md and clears turn history."""
+    if not _model_ready("b"):
+        # Reset the session state even without Model B (no re-init needed without a model)
+        keeper.hard_reset(keeper_session)
+        return {"ok": True, "message": "Session reset (Model B offline — will re-init on next review)"}
+    await keeper_session_init(state.client_b, keeper_session)
+    return {"ok": True, "message": "Keeper Hard Reset complete — CONCEPT.md re-read"}
 
 
 @app.websocket("/ws/logs")

@@ -3,6 +3,7 @@ import * as path from "path";
 import { BackendManager } from "./backendManager";
 import { StatusBarManager } from "./statusBar";
 import { ChatPanel } from "./chatPanel";
+import { KeeperPanel } from "./keeperPanel";
 import { CompletionProvider } from "./completionProvider";
 
 let backend: BackendManager | undefined;
@@ -75,6 +76,11 @@ export function activate(context: vscode.ExtensionContext): void {
     ["llama.showOutput", () => {
       backend?.showOutput();
     }],
+
+    ["llama.openKeeper", () => {
+      if (!backend) { return; }
+      KeeperPanel.open(backend);
+    }],
   ];
 
   const cmdDisposables = cmds.map(([id, handler]) =>
@@ -109,7 +115,8 @@ export function activate(context: vscode.ExtensionContext): void {
     configListener,
     { dispose: () => backend?.dispose() },
     { dispose: () => statusBar?.dispose() },
-    { dispose: () => ChatPanel.dispose() }
+    { dispose: () => ChatPanel.dispose() },
+    { dispose: () => KeeperPanel.dispose() }
   );
 }
 

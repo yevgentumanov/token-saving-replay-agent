@@ -38,6 +38,10 @@
       {
         "command": "llama.showOutput",
         "title": "Llama: Show Backend Output"
+      },
+      {
+        "command": "llama.openKeeper",
+        "title": "Llama: Open Concept Keeper"
       }
     ],
     "keybindings": [
@@ -50,6 +54,11 @@
         "command": "llama.toggleCompletion",
         "key": "ctrl+shift+;",
         "mac": "cmd+shift+;"
+      },
+      {
+        "command": "llama.openKeeper",
+        "key": "ctrl+shift+k",
+        "mac": "cmd+shift+k"
       }
     ],
     "configuration": {
