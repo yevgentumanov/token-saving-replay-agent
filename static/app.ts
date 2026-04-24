@@ -52,6 +52,9 @@ interface ConsolidationEntry {
 // ===== Helpers =====
 const $ = <T extends HTMLElement>(id: string) => document.getElementById(id) as T;
 
+// Detect VS Code webview iframe mode (chatPanel.ts passes ?vscode=1 in the iframe URL)
+const IS_VSCODE = new URLSearchParams(location.search).get("vscode") === "1";
+
 // ========================================================================
 // ============ LAUNCHER TAB ==============================================
 // ========================================================================
@@ -226,8 +229,14 @@ $("browseA").addEventListener("click",   () => browseFile("model",  pathA,    "M
 $("browseB").addEventListener("click",   () => browseFile("model",  pathB,    "Model B: "));
 $("browseBin").addEventListener("click", () => browseFile("binary", llamaPath,"llama-server: "));
 
-chatABtn.addEventListener("click", () => window.open(`http://localhost:${portA.value}`, "_blank"));
-chatBBtn.addEventListener("click", () => window.open(`http://localhost:${portB.value}`, "_blank"));
+// In VS Code webview (iframe), window.open is blocked — hide these buttons entirely
+if (IS_VSCODE) {
+  chatABtn.style.display = "none";
+  chatBBtn.style.display = "none";
+} else {
+  chatABtn.addEventListener("click", () => window.open(`http://localhost:${portA.value}`, "_blank"));
+  chatBBtn.addEventListener("click", () => window.open(`http://localhost:${portB.value}`, "_blank"));
+}
 
 // ===== Provider UI helpers =====
 function populateCloudModels(select: HTMLSelectElement, provider: string): void {

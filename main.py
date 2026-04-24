@@ -17,6 +17,7 @@ from typing import Optional
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
+from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
@@ -184,6 +185,16 @@ def _launch(model_path: str, args: str, host: str, port: int, llama_bin: str):
 
 # --- FastAPI ---
 app = FastAPI()
+
+# Allow VS Code webview panels (vscode-webview://*) and local browser dev
+app.add_middleware(
+    CORSMiddleware,
+    allow_origin_regex=r"(vscode-webview://[a-z0-9\-]+|http://localhost:\d+|http://127\.0\.0\.1:\d+)",
+    allow_methods=["GET", "POST", "OPTIONS"],
+    allow_headers=["Content-Type", "Authorization"],
+    allow_credentials=False,
+)
+
 app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 

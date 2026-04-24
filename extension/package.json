@@ -1,0 +1,105 @@
+{
+  "name": "token-saving-replay-agent",
+  "displayName": "Llama Dual-Model Assistant",
+  "description": "VS Code extension for local LLM chat and inline completion with dual-model support (Main Thinker + Patcher) and Consolidation Pass.",
+  "version": "0.1.0",
+  "publisher": "yevgentumanov",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.85.0"
+  },
+  "categories": [
+    "AI",
+    "Chat",
+    "Other"
+  ],
+  "activationEvents": [
+    "onStartupFinished"
+  ],
+  "main": "./out/extension.js",
+  "contributes": {
+    "commands": [
+      {
+        "command": "llama.openChat",
+        "title": "Llama: Open Chat Panel"
+      },
+      {
+        "command": "llama.startModels",
+        "title": "Llama: Start Models (A + B)"
+      },
+      {
+        "command": "llama.stopModels",
+        "title": "Llama: Stop Models"
+      },
+      {
+        "command": "llama.toggleCompletion",
+        "title": "Llama: Toggle Inline Completion"
+      },
+      {
+        "command": "llama.showOutput",
+        "title": "Llama: Show Backend Output"
+      }
+    ],
+    "keybindings": [
+      {
+        "command": "llama.openChat",
+        "key": "ctrl+shift+l",
+        "mac": "cmd+shift+l"
+      },
+      {
+        "command": "llama.toggleCompletion",
+        "key": "ctrl+shift+;",
+        "mac": "cmd+shift+;"
+      }
+    ],
+    "configuration": {
+      "title": "Llama Dual-Model Assistant",
+      "properties": {
+        "llama.pythonPath": {
+          "type": "string",
+          "default": "python",
+          "description": "Path to the Python executable used to start main.py."
+        },
+        "llama.backendPort": {
+          "type": "number",
+          "default": 7860,
+          "description": "Port that main.py listens on."
+        },
+        "llama.autoStart": {
+          "type": "boolean",
+          "default": false,
+          "description": "Automatically start the backend when VS Code opens the workspace."
+        },
+        "llama.completionEnabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Enable inline completion suggestions from Model B (Patcher)."
+        },
+        "llama.completionDebounceMs": {
+          "type": "number",
+          "default": 400,
+          "description": "Milliseconds to wait after the last keystroke before requesting a completion."
+        },
+        "llama.completionContextLines": {
+          "type": "number",
+          "default": 30,
+          "description": "Number of lines above the cursor to include as completion context."
+        },
+        "llama.completionMaxTokens": {
+          "type": "number",
+          "default": 200,
+          "description": "Maximum tokens for an inline completion response from Model B."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "compile": "tsc -p ./",
+    "watch": "tsc -watch -p ./"
+  },
+  "devDependencies": {
+    "@types/node": "^20.0.0",
+    "@types/vscode": "^1.85.0",
+    "typescript": "^5.3.0"
+  }
+}
