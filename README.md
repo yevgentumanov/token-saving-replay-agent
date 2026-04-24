@@ -193,6 +193,33 @@ Issues and PRs are welcome.
 
 ---
 
+## 👥 Contributors
+
+<div align="center">
+
+  <a href="https://github.com/yevgentumanov">
+    <img src="https://github.com/yevgentumanov.png" width="72" height="72" style="border-radius:50%" alt="yevgentumanov"/>
+    <br><b>yevgentumanov</b>
+  </a>
+
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+
+  <a href="https://claude.ai">
+    <img src="https://claude.ai/favicon.ico" width="72" height="72" style="border-radius:50%" alt="Claude"/>
+    <br><b>Claude</b>
+  </a>
+
+  &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
+
+  <a href="https://grok.x.ai">
+    <img src="https://grok.x.ai/favicon.ico" width="72" height="72" style="border-radius:50%" alt="Grok"/>
+    <br><b>Grok</b>
+  </a>
+
+</div>
+
+---
+
 <div align="center">
 
 Built by [@euusome](https://x.com/euusome) · Apache 2.0
