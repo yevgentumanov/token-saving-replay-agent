@@ -211,8 +211,8 @@ Issues and PRs are welcome.
 
   &nbsp;&nbsp;&nbsp;&nbsp;&nbsp;
 
-  <a href="https://grok.x.ai">
-    <img src="https://grok.x.ai/favicon.ico" width="72" height="72" style="border-radius:50%" alt="Grok"/>
+  <a href="https://x.ai">
+    <img src="https://x.ai/favicon.ico" width="72" height="72" style="border-radius:50%" alt="Grok"/>
     <br><b>Grok</b>
   </a>
 
