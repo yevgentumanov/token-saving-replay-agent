@@ -12,7 +12,6 @@ let completionProvider: CompletionProvider | undefined;
 export function activate(context: vscode.ExtensionContext): void {
   const repoRoot = _resolveRepoRoot(context);
 
-  // ── Core services ─────────────────────────────────────────────────────────
   backend = new BackendManager(repoRoot);
   completionProvider = new CompletionProvider(backend);
 
@@ -21,32 +20,25 @@ export function activate(context: vscode.ExtensionContext): void {
     .get<boolean>("completionEnabled", true);
   statusBar = new StatusBarManager(backend, completionEnabled);
 
-  // ── Register inline completion for all languages ──────────────────────────
   const completionRegistration = vscode.languages.registerInlineCompletionItemProvider(
     { pattern: "**" },
     completionProvider
   );
 
-  // ── Commands ──────────────────────────────────────────────────────────────
-  const cmds: [string, () => void][] = [
-    ["llama.openChat", () => {
+  const cmds: [string, () => void | Promise<void>][] = [
+    ["llama.openChat", async () => {
       if (!backend) { return; }
+      await backend.start();
       ChatPanel.open(backend);
     }],
 
     ["llama.startModels", async () => {
       if (!backend) { return; }
-      const cfg = vscode.workspace.getConfiguration("llama");
-      const autoStart = cfg.get<boolean>("autoStart", false);
-      if (!autoStart) {
-        vscode.window.showInformationMessage(
-          "Configure models in the Launcher tab, then use 'Start' there. " +
-          "Or enable llama.autoStart to launch automatically."
-        );
-        if (backend) { ChatPanel.open(backend); }
-        return;
-      }
       await backend.start();
+      ChatPanel.open(backend);
+      vscode.window.showInformationMessage(
+        "Llama backend is running. Configure and start models in the Launcher tab."
+      );
     }],
 
     ["llama.stopModels", async () => {
@@ -55,7 +47,7 @@ export function activate(context: vscode.ExtensionContext): void {
         await backend.stopModels();
         vscode.window.showInformationMessage("Llama: models stopped.");
       } catch (e: any) {
-        vscode.window.showErrorMessage(`Llama: stop failed — ${e.message}`);
+        vscode.window.showErrorMessage(`Llama: stop failed - ${e.message}`);
       }
     }],
 
@@ -81,17 +73,15 @@ export function activate(context: vscode.ExtensionContext): void {
     vscode.commands.registerCommand(id, handler)
   );
 
-  // ── Auto-start if configured ──────────────────────────────────────────────
   const autoStart = vscode.workspace
     .getConfiguration("llama")
     .get<boolean>("autoStart", false);
   if (autoStart) {
     backend.start().catch((e) =>
-      vscode.window.showErrorMessage(`Llama: backend start failed — ${e.message}`)
+      vscode.window.showErrorMessage(`Llama: backend start failed - ${e.message}`)
     );
   }
 
-  // ── React to settings changes ─────────────────────────────────────────────
   const configListener = vscode.workspace.onDidChangeConfiguration((e) => {
     if (e.affectsConfiguration("llama.completionEnabled") && completionProvider && statusBar) {
       const enabled = vscode.workspace
@@ -102,7 +92,6 @@ export function activate(context: vscode.ExtensionContext): void {
     }
   });
 
-  // ── Register all disposables ──────────────────────────────────────────────
   context.subscriptions.push(
     ...cmdDisposables,
     completionRegistration,
@@ -120,9 +109,6 @@ export function deactivate(): void {
   completionProvider = undefined;
 }
 
-// ── Helpers ───────────────────────────────────────────────────────────────────
-
 function _resolveRepoRoot(context: vscode.ExtensionContext): string {
-  // extension/ is a subdirectory of the repo root, so go one level up
   return path.resolve(context.extensionPath, "..");
 }

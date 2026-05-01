@@ -16,8 +16,6 @@ export class ChatPanel {
     this._setContent();
   }
 
-  // ── Singleton open/reveal ─────────────────────────────────────────────────
-
   static open(backend: BackendManager): void {
     if (ChatPanel.instance) {
       ChatPanel.instance.panel.reveal(vscode.ViewColumn.Beside);
@@ -30,7 +28,6 @@ export class ChatPanel {
       vscode.ViewColumn.Beside,
       {
         enableScripts: true,
-        // Allow the webview to make requests to our backend
         localResourceRoots: [],
       }
     );
@@ -43,13 +40,8 @@ export class ChatPanel {
     ChatPanel.instance = undefined;
   }
 
-  // ── Webview HTML ──────────────────────────────────────────────────────────
-
   private _setContent(): void {
     const url = this.backend.baseUrl;
-    // The webview wraps our existing UI in an iframe.
-    // CSP allows frames only from our localhost backend.
-    // ?vscode=1 tells app.ts it is running inside a VS Code webview iframe.
     this.panel.webview.html = this._buildHtml(url);
   }
 
@@ -101,7 +93,7 @@ export class ChatPanel {
 <body>
   <div id="loading">
     <div class="spinner"></div>
-    <span>Waiting for Llama backend…</span>
+    <span>Waiting for Llama backend...</span>
     <small style="color:#888">${backendUrl}</small>
   </div>
   <iframe id="chat" src="${iframeSrc}" title="Llama Chat"></iframe>

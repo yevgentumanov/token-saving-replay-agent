@@ -39,7 +39,13 @@ export class BackendManager {
   // ── Process management ────────────────────────────────────────────────────
 
   async start(): Promise<void> {
-    if (this.proc && !this.proc.killed) {
+    if (this.proc && this.proc.exitCode === null) {
+      return;
+    }
+
+    if (await this.isBackendReachable()) {
+      this.outputChannel.appendLine(`[BackendManager] Reusing backend at ${this.baseUrl}`);
+      this._startStatusPoll();
       return;
     }
 
@@ -68,6 +74,7 @@ export class BackendManager {
     this.proc.on("exit", (code) => {
       this.outputChannel.appendLine(`[BackendManager] Process exited with code ${code}`);
       this._stopStatusPoll();
+      this.proc = null;
       // If it crashed within 8 seconds of starting, surface an error notification
       if (code !== 0 && Date.now() - startTime < 8000) {
         vscode.window.showErrorMessage(
@@ -106,6 +113,7 @@ export class BackendManager {
   // ── Model control (delegates to our existing /api/start and /api/stop) ────
 
   async startModels(modelA: ModelConfig, modelB?: ModelConfig): Promise<void> {
+    await this.start();
     const body: Record<string, unknown> = {
       model_a: {
         path: modelA.path ?? "",

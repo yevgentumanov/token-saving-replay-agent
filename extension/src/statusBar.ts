@@ -15,7 +15,7 @@ export class StatusBarManager {
       100
     );
     this.item.command = "llama.showOutput";
-    this.item.tooltip = "Llama Dual-Model Assistant — click to show backend log";
+    this.item.tooltip = "Llama Dual-Model Assistant - click to show backend log";
     this._render(null);
     this.item.show();
 
@@ -35,7 +35,7 @@ export class StatusBarManager {
     if (!status) {
       this.item.text = "$(circle-slash) Llama: offline";
       this.item.backgroundColor = undefined;
-      this.item.tooltip = "Llama backend is not running — click to show output";
+      this.item.tooltip = "Llama backend is not running - click to show output";
       return;
     }
 
@@ -52,7 +52,7 @@ export class StatusBarManager {
       );
       this.item.text = `$(warning) Llama: VRAM error`;
       this.item.tooltip =
-        "A model ran out of VRAM — reduce -ngl or lower context size";
+        "A model ran out of VRAM - reduce -ngl or lower context size";
       return;
     }
 
