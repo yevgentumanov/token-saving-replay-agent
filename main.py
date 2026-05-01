@@ -3,7 +3,9 @@ import asyncio
 import atexit
 import errno
 import json
+import os
 import platform
+import re
 import shlex
 import shutil
 import signal
@@ -24,11 +26,14 @@ from pydantic import BaseModel
 
 import consolidation
 from consolidation import PatchRecord, run_consolidation_pass
+import keeper
+from keeper import KeeperSession, run_keeper_review, keeper_session_init
 from llm_clients import make_client
 
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.json"
 STATIC_DIR = BASE_DIR / "static"
+APP_VERSION = "0.1.0-alpha"
 
 DEFAULT_CONFIG = {
     "model_a_path": "",
@@ -68,6 +73,122 @@ def find_llama_server() -> str:
     return "llama-server.exe" if platform.system() == "Windows" else "llama-server"
 
 
+def _path_exists(value: str) -> bool:
+    return bool(value and Path(value).exists())
+
+
+def _normalize_os_name(system_name: Optional[str] = None) -> str:
+    system = system_name or platform.system()
+    if system == "Darwin":
+        return "macOS"
+    if system in {"Windows", "Linux"}:
+        return system
+    return system or "Unknown"
+
+
+def _read_linux_distro() -> str:
+    os_release = Path("/etc/os-release")
+    if not os_release.exists():
+        return ""
+    try:
+        values = {}
+        for line in os_release.read_text(encoding="utf-8", errors="replace").splitlines():
+            if "=" not in line:
+                continue
+            key, value = line.split("=", 1)
+            values[key] = value.strip().strip('"')
+        return values.get("PRETTY_NAME") or values.get("NAME", "")
+    except OSError:
+        return ""
+
+
+def _guess_shell() -> str:
+    shell_value = os.environ.get("SHELL", "")
+    if shell_value:
+        name = Path(shell_value).name.lower()
+        if name in {"bash", "zsh", "fish", "pwsh"}:
+            return name
+    if platform.system() == "Windows":
+        return "powershell"
+    if platform.system() == "Darwin":
+        return "zsh"
+    return "bash"
+
+
+def _version_from_output(output: str, prefix: str = "") -> str:
+    first_line = ""
+    for line in output.splitlines():
+        cleaned = line.strip()
+        if cleaned:
+            first_line = cleaned
+            break
+    if not first_line:
+        return ""
+    if prefix and first_line.lower().startswith(prefix.lower()):
+        first_line = first_line[len(prefix):].strip()
+    quoted = re.search(r'"([^"]+)"', first_line)
+    if quoted:
+        return quoted.group(1)
+    version = re.search(r"v?\d+(?:\.\d+)+(?:[-+._a-zA-Z0-9]*)?", first_line)
+    if version:
+        return version.group(0).lstrip("v")
+    return first_line[:120]
+
+
+def _safe_tool_check(command: list[str], prefix: str = "") -> dict:
+    executable = shutil.which(command[0])
+    if not executable:
+        return {"found": False, "version": ""}
+    try:
+        result = subprocess.run(
+            [executable, *command[1:]],
+            shell=False,
+            capture_output=True,
+            text=True,
+            timeout=2,
+            encoding="utf-8",
+            errors="replace",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return {"found": False, "version": ""}
+    output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+    version = _version_from_output(output, prefix)
+    return {"found": result.returncode == 0 or bool(version), "version": version}
+
+
+def detect_environment() -> dict:
+    os_name = _normalize_os_name()
+    distro = _read_linux_distro() if os_name == "Linux" else ""
+    tools = {
+        "python": _safe_tool_check([sys.executable, "--version"], "Python"),
+        "pip": _safe_tool_check(["pip", "--version"], "pip"),
+        "uv": _safe_tool_check(["uv", "--version"], "uv"),
+        "node": _safe_tool_check(["node", "--version"]),
+        "npm": _safe_tool_check(["npm", "--version"]),
+        "pnpm": _safe_tool_check(["pnpm", "--version"]),
+        "yarn": _safe_tool_check(["yarn", "--version"]),
+        "java": _safe_tool_check(["java", "-version"]),
+        "javac": _safe_tool_check(["javac", "-version"], "javac"),
+        "git": _safe_tool_check(["git", "--version"], "git version"),
+        "docker": _safe_tool_check(["docker", "--version"], "Docker version"),
+        "go": _safe_tool_check(["go", "version"], "go version"),
+        "rustc": _safe_tool_check(["rustc", "--version"], "rustc"),
+        "cargo": _safe_tool_check(["cargo", "--version"], "cargo"),
+        "dotnet": _safe_tool_check(["dotnet", "--version"]),
+    }
+    return {
+        "app_version": APP_VERSION,
+        "os": {
+            "name": os_name,
+            "platform": platform.platform(),
+            "release": platform.release(),
+            "distro": distro,
+        },
+        "shell": {"guess": _guess_shell()},
+        "tools": tools,
+    }
+
+
 # --- Global state ---
 class State:
     proc_a: Optional[subprocess.Popen] = None
@@ -92,6 +213,9 @@ class State:
 
 state = State()
 
+# Concept Keeper v-1: one session per server process
+keeper_session = KeeperSession()
+
 
 def _read_stream(stream, label: str, vram_flag: str, proc_ref: list):
     try:
@@ -111,7 +235,7 @@ def _read_stream(stream, label: str, vram_flag: str, proc_ref: list):
         proc = proc_ref[0] if proc_ref else None
         code = proc.poll() if proc else None
         if code is not None and code != 0:
-            msg = f"[{label}] ⚠ Process exited with code {code} — check your arguments (e.g. -ngl value) or model path"
+            msg = f"[{label}] Process exited with code {code}. Check arguments (for example -ngl) or model path."
             if state.loop and state.log_queue and not state.log_queue.full():
                 asyncio.run_coroutine_threadsafe(state.log_queue.put(msg), state.loop)
 
@@ -244,7 +368,7 @@ async def api_start(req: StartRequest):
         or state.client_a is not None or state.client_b is not None
     )
     if already:
-        raise HTTPException(400, "Already running — stop first")
+        raise HTTPException(400, "Already running; stop first")
 
     cfg = load_config()
     llama_bin = req.llama_server_path.strip() or cfg.get("llama_server_path") or find_llama_server()
@@ -299,7 +423,7 @@ async def api_start(req: StartRequest):
         threading.Thread(target=_read_stream, args=(proc_a.stdout, "A", "vram_a", [proc_a]), daemon=True).start()
     else:
         state.healthy_a = await state.client_a.health_check()
-        log_msg = f"[A] Connected to {req.model_a.provider} — {req.model_a.cloud_model}"
+        log_msg = f"[A] Connected to {req.model_a.provider}: {req.model_a.cloud_model}"
         if state.loop and state.log_queue and not state.log_queue.full():
             await state.log_queue.put(log_msg)
 
@@ -322,7 +446,7 @@ async def api_start(req: StartRequest):
             threading.Thread(target=_read_stream, args=(proc_b.stdout, "B", "vram_b", [proc_b]), daemon=True).start()
         else:
             state.healthy_b = await state.client_b.health_check()
-            log_msg = f"[B] Connected to {req.model_b.provider} — {req.model_b.cloud_model}"
+            log_msg = f"[B] Connected to {req.model_b.provider}: {req.model_b.cloud_model}"
             if state.loop and state.log_queue and not state.log_queue.full():
                 await state.log_queue.put(log_msg)
 
@@ -382,6 +506,51 @@ async def api_get_config():
     return load_config()
 
 
+@app.get("/api/diagnostics")
+async def api_diagnostics():
+    """
+    Return issue-friendly runtime diagnostics without secrets.
+    Do not include API keys, prompts, chat history, or raw config values that may
+    contain credentials.
+    """
+    cfg = load_config()
+    llama_bin = cfg.get("llama_server_path") or find_llama_server()
+    provider_a = state.provider_a if state.client_a or state.alive(state.proc_a) else cfg.get("model_a_provider", "local")
+    provider_b = state.provider_b if state.client_b or state.alive(state.proc_b) else cfg.get("model_b_provider", "local")
+    return {
+        "app_version": APP_VERSION,
+        "python_version": platform.python_version(),
+        "platform": platform.platform(),
+        "config_exists": CONFIG_FILE.exists(),
+        "llama_server_path_exists": _path_exists(llama_bin),
+        "model_a": {
+            "provider": provider_a,
+            "path_exists": _path_exists(cfg.get("model_a_path", "")),
+            "running": state.alive(state.proc_a) if provider_a == "local" else state.client_a is not None,
+            "healthy": state.healthy_a,
+            "vram_error": state.vram_a,
+            "port": state.port_a,
+        },
+        "model_b": {
+            "provider": provider_b,
+            "path_exists": _path_exists(cfg.get("model_b_path", "")),
+            "running": state.alive(state.proc_b) if provider_b == "local" else state.client_b is not None,
+            "healthy": state.healthy_b,
+            "vram_error": state.vram_b,
+            "port": state.port_b,
+        },
+    }
+
+
+@app.get("/api/environment/detect")
+async def api_environment_detect():
+    """
+    Detect the user's command environment for Profile auto-fill.
+    This intentionally returns only tool names/versions and coarse OS/shell data.
+    """
+    return detect_environment()
+
+
 @app.get("/api/open-file-dialog")
 async def api_open_file_dialog(type: str = "model"):
     try:
@@ -426,7 +595,7 @@ async def chat_main(request: Request):
 @app.post("/api/chat/patcher")
 async def chat_patcher(request: Request):
     if not _model_ready("b"):
-        raise HTTPException(400, "Patcher model (B) is not running — start it first")
+        raise HTTPException(400, "Patcher model (B) is not running; start it first")
     body = await request.json()
     try:
         result = await state.client_b.chat_complete(
@@ -451,18 +620,18 @@ class ConsolidationConfigBody(BaseModel):
 @app.post("/api/consolidation")
 async def api_consolidation(req: ConsolidationRequestBody):
     """
-    Phase 2.5 — Consolidation Pass.
+    Phase 2.5 - Consolidation Pass.
     Called by the frontend after all inline patches for a turn are done.
     Automatically selects full vs lightweight mode based on smart thresholds,
     then returns the result for injection into the next main-model system prompt.
     """
     if not _model_ready("b"):
-        raise HTTPException(400, "Patcher model (B) is not running — cannot run Consolidation Pass")
+        raise HTTPException(400, "Patcher model (B) is not running; cannot run Consolidation Pass")
     if not req.patches:
         return {"changed_steps": [], "summary": "", "state_delta": "", "patch_count": 0, "mode": "lightweight"}
     result = await run_consolidation_pass(state.client_b, req.patches)
     if result is None:
-        raise HTTPException(500, "Consolidation Pass failed — check patcher logs")
+        raise HTTPException(500, "Consolidation Pass failed; check patcher logs")
     return result.model_dump()
 
 
@@ -493,6 +662,53 @@ async def api_consolidation_config_set(body: ConsolidationConfigBody):
         "patch_threshold": consolidation.CONSOLIDATION_PATCH_THRESHOLD,
         "token_threshold": consolidation.CONSOLIDATION_TOKEN_THRESHOLD,
     }
+
+
+# Concept Keeper v-1
+
+class KeeperReviewRequest(BaseModel):
+    request: str
+
+
+@app.get("/api/keeper/status")
+async def api_keeper_status():
+    """Return the current Keeper session state (turn count, drift, last reset, etc.)."""
+    return keeper.get_status(keeper_session).model_dump()
+
+
+@app.post("/api/keeper/review")
+async def api_keeper_review(req: KeeperReviewRequest):
+    """
+    Submit a proposed change or decision for Concept Keeper review.
+    Uses Model B. Returns APPROVED / REJECTED / WARNING / HARD_RESET verdict.
+    """
+    if not _model_ready("b"):
+        raise HTTPException(400, "Patcher model (B) is not running; Keeper requires Model B")
+    if not req.request.strip():
+        raise HTTPException(400, "request must not be empty")
+
+    # Lazy init: initialize the session on first review if not already done
+    if not keeper_session.concept_md_loaded:
+        await keeper_session_init(state.client_b, keeper_session)
+
+    verdict = await run_keeper_review(state.client_b, keeper_session, req.request)
+
+    # If Keeper issued a Hard Reset, re-init so it's ready for the next review
+    if verdict.status == "HARD_RESET":
+        await keeper_session_init(state.client_b, keeper_session)
+
+    return verdict.model_dump()
+
+
+@app.post("/api/keeper/reset")
+async def api_keeper_reset():
+    """Force a Keeper Hard Reset; re-reads CONCEPT.md and clears turn history."""
+    if not _model_ready("b"):
+        # Reset the session state even without Model B (no re-init needed without a model)
+        keeper.hard_reset(keeper_session)
+        return {"ok": True, "message": "Session reset (Model B offline; will re-init on next review)"}
+    await keeper_session_init(state.client_b, keeper_session)
+    return {"ok": True, "message": "Keeper Hard Reset complete; CONCEPT.md re-read"}
 
 
 @app.websocket("/ws/logs")

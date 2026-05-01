@@ -1,311 +1,162 @@
-# Installation & Usage Guide
+# Installation and Usage Guide
 
-> **Windows users:** skip this file — `start.bat` handles everything automatically.  
-> This guide covers manual setup for Linux, macOS, and Windows power users.
-
----
-
-## Contents
-
-1. [Requirements](#1-requirements)
-2. [Install the app](#2-install-the-app)
-3. [Get llama-server](#3-get-llama-server)
-4. [Get model files](#4-get-model-files)
-5. [Launch](#5-launch)
-6. [Launcher tab](#6-launcher-tab)
-7. [Profile tab](#7-profile-tab)
-8. [Chat tab](#8-chat-tab)
-9. [Keyboard shortcuts](#9-keyboard-shortcuts)
-10. [Troubleshooting](#10-troubleshooting)
-11. [File layout](#11-file-layout)
-12. [Recompiling TypeScript](#12-recompiling-typescript-optional)
-
----
+This guide covers the browser alpha. The VS Code extension is experimental.
 
 ## 1. Requirements
 
 | Requirement | Notes |
-|-------------|-------|
-| Python 3.10+ | System Python is fine |
-| `llama-server` binary | From [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases) |
-| One or two `.gguf` model files | See §4 for recommendations |
-| A modern browser | Chrome, Edge, Firefox |
+|---|---|
+| Python 3.10+ | Needed for manual cross-platform setup |
+| `llama-server` | Download or build from llama.cpp |
+| GGUF model files | One for Model A, optional smaller one for Model B |
+| Modern browser | Chrome, Edge, Firefox, or similar |
 
-No Node.js. No npm. No Docker. No installer.
+Windows users can run `start.bat` for the portable setup path.
 
----
-
-## 2. Install the app
+## 2. Manual Install
 
 ```bash
 git clone https://github.com/yevgentumanov/token-saving-replay-agent.git
 cd token-saving-replay-agent
 pip install -r requirements.txt
+python main.py
 ```
 
----
+Open `http://localhost:7860`.
 
 ## 3. Get llama-server
 
-### Windows (manual)
+### Windows
 
-Download a pre-built release from [llama.cpp releases](https://github.com/ggml-org/llama.cpp/releases).
+Download a llama.cpp release archive and extract `llama-server.exe`.
 
-Recommended build for b8855: `llama-b8855-bin-win-cpu-x64.zip`  
-Extract it anywhere (e.g. `D:\llama\`). The binary is `llama-server.exe`.
+Recommended CPU build for the portable launcher:
 
-Want GPU acceleration? Use the CUDA or Vulkan build instead:
-- `llama-b8855-bin-win-cuda-cu12.4-x64.zip` — requires CUDA 12.4 runtime
-- `llama-b8855-bin-win-vulkan-x64.zip` — requires Vulkan runtime
+```text
+llama-b8855-bin-win-cpu-x64.zip
+```
+
+CUDA and Vulkan builds can also be used if your machine supports them.
 
 ### Linux / macOS
 
-Build from source:
+Build llama.cpp from source:
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp
 cd llama.cpp
 cmake -B build -DLLAMA_CURL=ON
 cmake --build build --config Release -j$(nproc)
-# binary is at build/bin/llama-server
 ```
 
-Or download a pre-built binary from the releases page if one is available for your platform.
+The binary is usually in `build/bin/llama-server`.
 
-You do **not** need `llama-server` in the project folder — you point to it in the Launcher tab.
+## 4. Configure the Launcher
 
----
+In the Launcher tab:
 
-## 4. Get model files
+1. Choose the provider for Model A.
+2. For local mode, select the Model A `.gguf` path.
+3. For cloud mode, select a LiteLLM model and enter an API key.
+4. Optionally enable Model B and configure a smaller local or cloud model.
+5. Set the `llama-server` binary path for local models.
+6. Click Start.
 
-You need `.gguf` quantized model files.
+Model A is required for chat. Model B is optional; without it, inline patching,
+error-popup fixes, and consolidation are disabled with a visible warning.
 
-**Where to download:**
-- [bartowski's quants](https://huggingface.co/bartowski) — well-maintained, wide selection
-- [unsloth's quants](https://huggingface.co/unsloth) — optimised quantizations
-- [Hugging Face GGUF search](https://huggingface.co/models?search=gguf) — everything else
+## 5. Profile Tab
 
-**Main Model (A) — the thinker.** Use anything 7B or larger:
-- Qwen3-14B, Qwen2.5-32B, DeepSeek-R1-14B, Mistral-7B, LLaMA-3.1-8B
-- Q5_K_M or Q8_0 for best output quality
+Fill in your environment:
 
-**Patcher Model (B) — the fixer.** Use the smallest, fastest model you have:
-- Qwen3-1.7B, Qwen2.5-1.5B, SmolLM2-1.7B, Llama-3.2-1B
-- Q4 or Q5 is fine — accuracy matters less than speed here
+- shell
+- OS
+- Python version
+- package manager
+- naming rules
+- custom rules
 
-> **Thinking models (Qwen3, DeepSeek-R1, etc.) work for both roles.**  
-> The agent sends `/no_think` to suppress chain-of-thought on the patcher.  
-> If the model ignores it, the answer is extracted from `reasoning_content` automatically.
+The profile is saved in `localStorage` and added to every Model A request.
+The patcher uses it to rewrite command blocks for your shell.
 
----
+## 6. Chat Tab
 
-## 5. Launch
+- Press Enter to send.
+- Press Shift+Enter for a newline.
+- Command code blocks get Copy and Problem buttons.
+- If Model B is healthy, shell command blocks are checked and patched.
+- Applied patches can be undone.
+- Consolidation Pass summarizes patch changes for the next turn.
 
-```bash
-python main.py
-```
+## 7. Diagnostics
 
-Browser opens at `http://localhost:7860`. You'll land on the **Launcher** tab.
+The Launcher tab has a Diagnostics button. It returns safe JSON for issues:
 
----
+- app version
+- Python version
+- platform
+- Model A/B provider, health, running state, port
+- whether configured local paths exist
 
-## 6. Launcher tab
+It does not include API keys, prompts, chat history, or raw model paths.
 
-This is where you start and stop your models.
+## 8. Config Files
 
-### Step-by-step
+- `config.json` is local runtime state and is ignored by git.
+- `config.example.json` shows the expected shape.
+- Cloud API keys are stored locally if you use cloud providers.
 
-**1. Set the llama-server binary**
+## 9. Troubleshooting
 
-Click **Browse…** next to "llama-server binary" and select:
-- Windows: `llama-server.exe`
-- Linux/macOS: `llama-server` (no extension)
+### Main Model is not running
 
-**2. Configure Main Model (A)**
+Start Model A from the Launcher tab. For local mode, check that the GGUF path and
+`llama-server` path exist.
 
-| Setting | Default | Notes |
-|---------|---------|-------|
-| Model path | — | Browse to your main `.gguf` |
-| Extra args | `-c 16384 -ngl 99 -t 6 --no-mmap --flash-attn on` | See arg reference below |
-| Port | `8080` | Change if in use |
+### Patcher is offline
 
-**3. Configure Patcher Model (B)**
+Chat still works. Inline fixes and consolidation are disabled until Model B is
+started and healthy.
 
-Check **"Enable patcher model (Model B)"**, then:
+### Port already in use
 
-| Setting | Default | Notes |
-|---------|---------|-------|
-| Model path | — | Browse to your small/fast `.gguf` |
-| Extra args | `-c 4096 -ngl 0 -t 4` | CPU-only is fine for 1–3B models |
-| Port | `8081` | Change if in use |
+Change the port in the Launcher tab or stop the process using that port.
 
-**4. Set Host**
+Windows:
 
-Default `0.0.0.0` serves on all interfaces. Use `127.0.0.1` to restrict to localhost.
-
-**5. Click Start**
-
-Status indicator: 🟡 loading → 🟢 healthy (responding to `/v1/models`)
-
-Watch the log console for real-time llama-server output. Large models can take 10–60 s to load.
-
-**To stop:** click **Stop All** — both processes are terminated.
-
-### llama-server arg reference
-
-| Arg | Effect |
-|-----|--------|
-| `-c N` | Context length in tokens. Reduce if you run out of VRAM. |
-| `-ngl N` | GPU layers to offload. `0` = CPU only. `99` = offload everything. |
-| `-t N` | CPU threads. Match your physical core count. |
-| `--no-mmap` | Disables memory-mapped file loading. More stable on Windows. |
-| `--flash-attn on` | Faster attention computation. Remove if your GPU doesn't support it. |
-
----
-
-## 7. Profile tab
-
-Fill in your environment once. These fields become a system prompt injected into every request — the main model knows your full setup before you type anything.
-
-| Field | Example value |
-|-------|--------------|
-| Shell | `PowerShell` |
-| OS | `Windows 11` |
-| Python version | `3.12` |
-| Package manager | `uv` |
-| Naming convention | `snake_case for Python, kebab-case for folders` |
-| Custom rules | `always use uv, never pip` / `prefer async/await` / `use pathlib not os.path` |
-
-All fields **auto-save as you type** (localStorage). No save button needed.
-
----
-
-## 8. Chat tab
-
-### Sending messages
-
-- `Enter` — send
-- `Shift+Enter` — new line
-- Responses stream in real time from the main model
-
-### Automatic Step Extractor
-
-Every response is parsed into addressable blocks as it arrives:
-- Section headers and numbered list items → `step-1`, `step-2`, …
-- Code blocks → `code-block-1`, `code-block-2`, …
-
-### Automatic Inline Patcher
-
-After streaming completes, every command block (`bash`, `sh`, `cmd`, `powershell`, `batch`, `zsh`, `fish`) is silently sent to the patcher model.
-
-If a command doesn't match your profile, it's rewritten in place:
-- A green badge appears: `✓ auto-translated → powershell`
-- Click **↶ undo** to restore the original at any time
-
-### Error Popup
-
-When a command fails in your terminal:
-
-1. Click **⚠ Problem?** on that code block
-2. The popup shows the block content
-3. Paste your terminal error (type it, or click **📋 Paste from clipboard**)
-4. Click **Ask patcher**
-5. The patcher responds with a proposed fix and explanation
-6. Click **✓ Apply to block** to replace the block content
-
-Cost: ~200–400 tokens from the small model. Main conversation context is never modified.
-
-### Copy button
-
-Every code block has a **Copy** button. Click to copy the (potentially patched) command to clipboard.
-
-### Conversation persistence
-
-Chat history is stored in `sessionStorage` — survives page refresh, cleared when you close the tab.  
-Click **Clear** to start a fresh session manually.
-
----
-
-## 9. Keyboard shortcuts
-
-| Key | Action |
-|-----|--------|
-| `Enter` | Send message |
-| `Shift+Enter` | New line in input |
-| `Esc` | Close error popup |
-
----
-
-## 10. Troubleshooting
-
-**"llama-server binary not found"**  
-→ Go to Launcher tab → Browse… → select your `llama-server.exe` (or `llama-server`).
-
-**"File not found: …gguf"**  
-→ The model path is wrong or the drive isn't mounted. Re-browse to the file.
-
-**"Port 8080 is already in use"**  
-→ Change the port in the Launcher tab, or find and stop the process using that port:
 ```powershell
-# Windows — find what's using port 8080
 netstat -ano | findstr :8080
 ```
 
-**Status stays yellow (Starting…) indefinitely**  
-→ The model is still loading. This is normal for large models (10–60 s). Watch the log console — if you see a memory error or crash, check VRAM.
+### VRAM error
 
-**Red VRAM error badge**  
-Options, in order of impact:
-1. Reduce `-ngl 99` to a lower number (offload fewer layers to GPU)
-2. Switch to a more quantized version of the model (Q4 instead of Q8)
-3. Reduce `-c 16384` (shorter context = less VRAM)
-4. Add `-ngl 0` to run fully on CPU
+Try these in order:
 
-**Patcher doesn't run after responses**  
-→ Check: (a) Model B status is 🟢, (b) "Enable patcher model" is checked in Launcher.
+1. Lower `-ngl`.
+2. Use a smaller or more quantized model.
+3. Lower `-c`.
+4. Use CPU mode with `-ngl 0`.
 
-**"Patcher model (B) is not running"**  
-→ Return to Launcher tab, add a Model B path, click Start.
+### Cloud provider fails
 
-**"Main Model (A) is not running"**  
-→ Start Model A from the Launcher tab first.
+Check that the API key is present, the model ID is valid for LiteLLM, and your
+network can reach the provider.
 
-**Patcher rewrites things it shouldn't**  
-→ Add explicit rules to your Profile tab — e.g. "do not rewrite git commands" or "leave curl commands as-is".
+## 10. Recompile TypeScript
 
----
-
-## 11. File layout
-
-```
-token-saving-replay-agent/
-│
-├── main.py                  # FastAPI backend — serves UI + proxies to llama-server
-├── portable_launcher.py     # Windows launcher logic (called by start.bat)
-├── start.bat                # Windows zero-install entry point
-│
-├── static/
-│   ├── index.html           # Single-page app (Launcher / Chat / Profile tabs)
-│   ├── app.ts               # TypeScript source
-│   └── app.js               # Compiled JS — committed, no build step for users
-│
-├── requirements.txt         # Python dependencies
-├── config.json              # Last-used settings — auto-written, safe to edit
-│
-├── python/                  # Portable Python (Windows only, created by start.bat)
-└── bin/                     # llama-server.exe (Windows only, created by start.bat)
-```
-
-`config.json` is written automatically when you start models. You can edit it manually — it's plain JSON.
-
----
-
-## 12. Recompiling TypeScript (optional)
-
-Only needed if you modify `static/app.ts`. Requires Node.js.
+Only needed after editing `static/app.ts`:
 
 ```bash
 npx tsc --target ES2020 --lib ES2020,DOM --strict --outDir static static/app.ts
 ```
 
-End users never need this — `app.js` is already compiled and committed.
+## 11. Run Alpha Tests
+
+```bash
+npm install
+npm run test:alpha
+```
+
+The alpha suite runs backend/config/consolidation tests plus Playwright browser
+smoke tests. The browser tests start `python main.py` with `LLAMA_NO_BROWSER=1`
+and verify the Launcher, Diagnostics, and offline Chat warning.

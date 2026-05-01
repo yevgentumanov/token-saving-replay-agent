@@ -1,7 +1,9 @@
 """
-Portable launcher for Token Saving Replay Agent.
-Called by start.bat after embedded Python is ready.
-Handles: dep install, llama-server download, model selection, app launch.
+Portable Windows launcher for Token Saving Replay Agent.
+
+Called by start.bat after embedded Python is ready. It installs Python
+dependencies, downloads llama-server.exe if needed, lets the user pick model
+files, and starts the FastAPI browser app.
 """
 
 import json
@@ -23,9 +25,8 @@ DEPS_MARKER = PYTHON_DIR / ".deps_installed"
 APP_PORT = 7860
 APP_URL = f"http://localhost:{APP_PORT}"
 
-# Pinned llama.cpp release — update this tag + URL together when upgrading.
-# CPU build works on every machine; CUDA builds are in the same release if needed:
-#   llama-b8855-bin-win-cuda-cu12.4-x64.zip  (requires CUDA 12.4 runtime)
+# Pinned llama.cpp release. CPU build works on every Windows machine; users can
+# swap in CUDA or Vulkan builds manually by replacing bin/llama-server.exe.
 LLAMA_TAG = "b8855"
 LLAMA_ZIP_NAME = f"llama-{LLAMA_TAG}-bin-win-cpu-x64.zip"
 LLAMA_DOWNLOAD_URL = (
@@ -33,8 +34,24 @@ LLAMA_DOWNLOAD_URL = (
     f"/{LLAMA_TAG}/{LLAMA_ZIP_NAME}"
 )
 
+DEFAULT_CONFIG: dict = {
+    "model_a_path": "",
+    "model_a_args": "-c 16384 -ngl 99 -t 6 --no-mmap --flash-attn on",
+    "model_a_port": 8080,
+    "model_b_path": "",
+    "model_b_args": "-c 4096 -ngl 0 -t 4",
+    "model_b_port": 8081,
+    "host": "0.0.0.0",
+    "llama_server_path": "",
+    "use_patcher": True,
+    "model_a_provider": "local",
+    "model_a_api_key": "",
+    "model_a_cloud_model": "",
+    "model_b_provider": "local",
+    "model_b_api_key": "",
+    "model_b_cloud_model": "",
+}
 
-# ── Helpers ───────────────────────────────────────────────────────────────────
 
 def banner(text: str):
     print(f"\n  {text}")
@@ -44,10 +61,9 @@ def step(n: int, total: int, text: str):
     print(f"[{n}/{total}] {text}")
 
 
-# ── Step 1: Install Python dependencies ──────────────────────────────────────
-
 def ensure_deps():
     import hashlib
+
     req_file = BASE_DIR / "requirements.txt"
     req_hash = hashlib.sha256(req_file.read_bytes()).hexdigest()[:16]
 
@@ -56,24 +72,30 @@ def ensure_deps():
 
     step(1, 3, "Installing Python dependencies ...")
     subprocess.run(
-        [sys.executable, "-m", "pip", "install", "-r", str(req_file),
-         "--no-warn-script-location", "--quiet"],
+        [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "-r",
+            str(req_file),
+            "--no-warn-script-location",
+            "--quiet",
+        ],
         check=True,
     )
     DEPS_MARKER.write_text(req_hash)
-    print("      Dependencies ready!")
+    print("      Dependencies ready.")
 
-
-# ── Step 2: Download llama-server.exe ────────────────────────────────────────
 
 def _download_with_progress(url: str, dest: Path):
-    """Download url → dest, printing a simple progress indicator."""
+    """Download url to dest, printing a simple progress indicator."""
     try:
         req = urllib.request.Request(url, headers={"User-Agent": "token-saving-replay-agent"})
         with urllib.request.urlopen(req, timeout=60) as resp:
             total = int(resp.headers.get("Content-Length", 0))
             downloaded = 0
-            chunk = 1024 * 64  # 64 KB
+            chunk = 1024 * 64
             with open(dest, "wb") as f:
                 while True:
                     block = resp.read(chunk)
@@ -83,8 +105,13 @@ def _download_with_progress(url: str, dest: Path):
                     downloaded += len(block)
                     if total:
                         pct = downloaded * 100 // total
-                        print(f"\r      {pct:3d}%  ({downloaded // 1024 // 1024} MB / {total // 1024 // 1024} MB) ", end="", flush=True)
-        print()  # newline after progress
+                        print(
+                            f"\r      {pct:3d}%  "
+                            f"({downloaded // 1024 // 1024} MB / {total // 1024 // 1024} MB) ",
+                            end="",
+                            flush=True,
+                        )
+        print()
     except urllib.error.URLError as e:
         dest.unlink(missing_ok=True)
         raise RuntimeError(
@@ -93,7 +120,7 @@ def _download_with_progress(url: str, dest: Path):
             "  Manual fix:\n"
             f"    1. Download: {LLAMA_DOWNLOAD_URL}\n"
             "    2. Extract llama-server.exe from the zip.\n"
-            "    3. Place it in:  .\\bin\\llama-server.exe\n"
+            "    3. Place it in: .\\bin\\llama-server.exe\n"
             "    4. Re-run start.bat."
         ) from e
 
@@ -104,7 +131,7 @@ def ensure_llama_server() -> str:
         return str(exe)
 
     BIN_DIR.mkdir(exist_ok=True)
-    step(2, 3, f"Downloading llama-server ({LLAMA_TAG}) — this happens only once ...")
+    step(2, 3, f"Downloading llama-server ({LLAMA_TAG}); this happens only once ...")
     print(f"      URL: {LLAMA_DOWNLOAD_URL}")
 
     zip_path = BIN_DIR / LLAMA_ZIP_NAME
@@ -122,8 +149,8 @@ def ensure_llama_server() -> str:
             raise RuntimeError(
                 "llama-server.exe was not found inside the downloaded zip.\n"
                 f"  Archive: {zip_path.name}\n"
-                "  Try downloading a different build from the releases page and\n"
-                "  placing llama-server.exe in .\\bin\\ manually."
+                "  Try downloading another llama.cpp build and placing\n"
+                "  llama-server.exe in .\\bin\\ manually."
             )
 
     zip_path.unlink(missing_ok=True)
@@ -131,10 +158,8 @@ def ensure_llama_server() -> str:
     return str(exe)
 
 
-# ── Step 3: Model selection ───────────────────────────────────────────────────
-
 def _pick_file_powershell(title: str, initial_dir: str = "") -> str:
-    """Open a native Windows file-open dialog via PowerShell (no tkinter needed)."""
+    """Open a native Windows file-open dialog via PowerShell."""
     init = initial_dir.replace("'", "") or str(Path.home())
     ps = (
         "Add-Type -AssemblyName System.Windows.Forms; "
@@ -146,7 +171,8 @@ def _pick_file_powershell(title: str, initial_dir: str = "") -> str:
     )
     result = subprocess.run(
         ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-Command", ps],
-        capture_output=True, text=True,
+        capture_output=True,
+        text=True,
     )
     return result.stdout.strip()
 
@@ -164,45 +190,30 @@ def ensure_models(cfg: dict) -> tuple[dict, bool]:
     step(3, 3, "Model selection ...")
     print()
     print("  A file dialog will open for each model.")
-    print("  Press Cancel to skip — you can configure models later in the web UI.")
+    print("  Press Cancel to skip; you can configure models later in the web UI.")
     print()
 
     if model_a_missing:
-        print("  --> Select your MAIN model (large LLM, e.g. Qwen3-14B, Gemma-4B ...)")
-        path = _pick_file_powershell("Select MAIN model — large LLM (.gguf)")
+        print("  --> Select your MAIN model (larger GGUF model, e.g. Qwen3-14B).")
+        path = _pick_file_powershell("Select MAIN model - GGUF")
         if path:
             cfg["model_a_path"] = path
             changed = True
-            print(f"      Main model : {path}")
+            print(f"      Main model: {path}")
         else:
-            print("      (skipped — configure via web UI)")
+            print("      Skipped. Configure it later in the web UI.")
 
     if model_b_missing:
-        print("  --> Select your PATCHER model (small LLM, e.g. Qwen3-1.7B, SmolLM ...)")
-        path = _pick_file_powershell("Select PATCHER model — small LLM (.gguf)")
+        print("  --> Select your PATCHER model (small GGUF model, e.g. Qwen3-1.7B).")
+        path = _pick_file_powershell("Select PATCHER model - GGUF")
         if path:
             cfg["model_b_path"] = path
             changed = True
             print(f"      Patcher model: {path}")
         else:
-            print("      (skipped — configure via web UI)")
+            print("      Skipped. Chat can run without Model B, but inline fixes will be disabled.")
 
     return cfg, changed
-
-
-# ── Config ────────────────────────────────────────────────────────────────────
-
-DEFAULT_CONFIG: dict = {
-    "model_a_path": "",
-    "model_a_args": "-c 16384 -ngl 99 -t 6 --no-mmap --flash-attn on",
-    "model_a_port": 8080,
-    "model_b_path": "",
-    "model_b_args": "-c 4096 -ngl 0 -t 4",
-    "model_b_port": 8081,
-    "host": "0.0.0.0",
-    "llama_server_path": "",
-    "use_patcher": True,
-}
 
 
 def load_config() -> dict:
@@ -217,17 +228,14 @@ def save_config(cfg: dict):
         json.dump(cfg, f, indent=2)
 
 
-# ── Launch ────────────────────────────────────────────────────────────────────
-
 def launch_app():
     banner("Starting Token Saving Replay Agent ...")
     print(f"  Browser will open at {APP_URL}")
-    print("  Press Ctrl+C in this window to stop all servers.")
+    print("  Press Ctrl+C in this window to stop the app and model servers.")
     print()
 
     proc = subprocess.Popen([sys.executable, str(BASE_DIR / "main.py")])
 
-    # Give uvicorn a moment to bind the port before opening the browser
     time.sleep(2)
     webbrowser.open(APP_URL)
 
@@ -242,15 +250,12 @@ def launch_app():
             proc.kill()
 
 
-# ── Entry point ───────────────────────────────────────────────────────────────
-
 def main():
     banner("Setup")
     print()
 
     try:
         ensure_deps()
-
         llama_exe = ensure_llama_server()
 
         cfg = load_config()
@@ -259,7 +264,6 @@ def main():
         save_config(cfg)
 
         launch_app()
-
     except KeyboardInterrupt:
         print("\n  Cancelled.")
         sys.exit(0)
