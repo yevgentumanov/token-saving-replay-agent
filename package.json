@@ -1,0 +1,10 @@
+{
+  "private": true,
+  "scripts": {
+    "test:browser": "playwright test",
+    "test:alpha": "python -m unittest discover -s tests -p \"test_*.py\" && playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.52.0"
+  }
+}

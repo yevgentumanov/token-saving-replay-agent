@@ -1,0 +1,17 @@
+{
+  "model_a_path": "",
+  "model_a_args": "-c 16384 -ngl 99 -t 6 --no-mmap --flash-attn on",
+  "model_a_port": 8080,
+  "model_b_path": "",
+  "model_b_args": "-c 4096 -ngl 0 -t 4",
+  "model_b_port": 8081,
+  "host": "0.0.0.0",
+  "llama_server_path": "",
+  "use_patcher": true,
+  "model_a_provider": "local",
+  "model_a_api_key": "",
+  "model_a_cloud_model": "",
+  "model_b_provider": "local",
+  "model_b_api_key": "",
+  "model_b_cloud_model": ""
+}

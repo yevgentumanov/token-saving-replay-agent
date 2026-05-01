@@ -1,7 +1,9 @@
 "use strict";
-// app.ts — Compile: npx tsc --target ES2020 --lib ES2020,DOM --strict --outDir . app.ts
+// app.ts - Compile: npx tsc --target ES2020 --lib ES2020,DOM --strict --outDir static static/app.ts
 // ===== Helpers =====
 const $ = (id) => document.getElementById(id);
+// Detect VS Code webview iframe mode (chatPanel.ts passes ?vscode=1 in the iframe URL)
+const IS_VSCODE = new URLSearchParams(location.search).get("vscode") === "1";
 // ========================================================================
 // ============ LAUNCHER TAB ==============================================
 // ========================================================================
@@ -24,7 +26,10 @@ const stopBtn = $("stopBtn");
 const chatABtn = $("chatA");
 const chatBBtn = $("chatB");
 const consoleDiv = $("console");
-// Cloud / provider elements — Model A
+const diagnosticsBtn = $("diagnosticsBtn");
+const copyDiagnosticsBtn = $("copyDiagnosticsBtn");
+const diagnosticsPanel = $("diagnosticsPanel");
+// Cloud / provider elements - Model A
 const providerA = $("providerA");
 const localFieldsA = $("localFieldsA");
 const cloudFieldsA = $("cloudFieldsA");
@@ -32,7 +37,7 @@ const cloudModelSelectA = $("cloudModelSelectA");
 const customModelFieldA = $("customModelFieldA");
 const customModelA = $("customModelA");
 const apiKeyA = $("apiKeyA");
-// Cloud / provider elements — Model B
+// Cloud / provider elements - Model B
 const providerB = $("providerB");
 const localFieldsB = $("localFieldsB");
 const cloudFieldsB = $("cloudFieldsB");
@@ -46,19 +51,19 @@ const CLOUD_MODELS = {
         { value: "gpt-4o-mini", label: "GPT-4o mini" },
         { value: "o3", label: "o3" },
         { value: "o4-mini", label: "o4-mini" },
-        { value: "__custom__", label: "Custom model ID…" },
+        { value: "__custom__", label: "Custom model ID..." },
     ],
     anthropic: [
         { value: "claude-opus-4-7", label: "Claude Opus 4.7" },
         { value: "claude-sonnet-4-6", label: "Claude Sonnet 4.6" },
         { value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5" },
-        { value: "__custom__", label: "Custom model ID…" },
+        { value: "__custom__", label: "Custom model ID..." },
     ],
     groq: [
         { value: "llama-3.3-70b-versatile", label: "Llama 3.3 70B" },
         { value: "llama-3.1-8b-instant", label: "Llama 3.1 8B (fast)" },
         { value: "mixtral-8x7b-32768", label: "Mixtral 8x7B" },
-        { value: "__custom__", label: "Custom model ID…" },
+        { value: "__custom__", label: "Custom model ID..." },
     ],
 };
 const LAUNCHER_KEYS = [
@@ -145,7 +150,7 @@ function applyStatus(s, dot, label, chatBtn) {
         : s.vram_error ? "VRAM Error"
             : s.healthy
                 ? (s.provider === "local" ? `Running (pid ${s.pid})` : `Ready (${s.provider})`)
-                : "Starting…";
+                : "Starting...";
     chatBtn.style.display = (s.running && s.healthy && s.provider === "local") ? "block" : "none";
 }
 async function pollStatus() {
@@ -198,12 +203,46 @@ async function browseFile(type, target, logMsg) {
 $("browseA").addEventListener("click", () => browseFile("model", pathA, "Model A: "));
 $("browseB").addEventListener("click", () => browseFile("model", pathB, "Model B: "));
 $("browseBin").addEventListener("click", () => browseFile("binary", llamaPath, "llama-server: "));
-chatABtn.addEventListener("click", () => window.open(`http://localhost:${portA.value}`, "_blank"));
-chatBBtn.addEventListener("click", () => window.open(`http://localhost:${portB.value}`, "_blank"));
+async function loadDiagnostics(copy = false) {
+    try {
+        const r = await fetch("/api/diagnostics");
+        const data = await r.json();
+        if (!r.ok)
+            throw new Error(data.detail || `HTTP ${r.status}`);
+        const text = JSON.stringify(data, null, 2);
+        diagnosticsPanel.textContent = text;
+        diagnosticsPanel.classList.add("show");
+        copyDiagnosticsBtn.style.display = "";
+        if (copy) {
+            await navigator.clipboard.writeText(text);
+            addLog("Diagnostics copied to clipboard", "log-info");
+        }
+        else {
+            addLog("Diagnostics loaded", "log-info");
+        }
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        diagnosticsPanel.textContent = `Diagnostics failed: ${msg}`;
+        diagnosticsPanel.classList.add("show");
+        addLog("Diagnostics failed: " + msg, "log-error");
+    }
+}
+diagnosticsBtn.addEventListener("click", () => loadDiagnostics(false));
+copyDiagnosticsBtn.addEventListener("click", () => loadDiagnostics(true));
+// In VS Code webview (iframe), window.open is blocked; hide these buttons entirely.
+if (IS_VSCODE) {
+    chatABtn.style.display = "none";
+    chatBBtn.style.display = "none";
+}
+else {
+    chatABtn.addEventListener("click", () => window.open(`http://localhost:${portA.value}`, "_blank"));
+    chatBBtn.addEventListener("click", () => window.open(`http://localhost:${portB.value}`, "_blank"));
+}
 // ===== Provider UI helpers =====
 function populateCloudModels(select, provider) {
     select.innerHTML = "";
-    const models = CLOUD_MODELS[provider] || [{ value: "__custom__", label: "Custom model ID…" }];
+    const models = CLOUD_MODELS[provider] || [{ value: "__custom__", label: "Custom model ID..." }];
     models.forEach(m => {
         const opt = document.createElement("option");
         opt.value = m.value;
@@ -248,7 +287,7 @@ startBtn.addEventListener("click", async () => {
     }
     saveLauncherSettings();
     startBtn.disabled = true;
-    addLog("Starting…", "log-info");
+    addLog("Starting...", "log-info");
     const cloudModelA = cloudModelSelectA.value === "__custom__" ? customModelA.value.trim() : cloudModelSelectA.value;
     const cloudModelB = cloudModelSelectB.value === "__custom__" ? customModelB.value.trim() : cloudModelSelectB.value;
     const body = {
@@ -291,7 +330,7 @@ startBtn.addEventListener("click", async () => {
     }
 });
 stopBtn.addEventListener("click", async () => {
-    addLog("Stopping all…", "log-info");
+    addLog("Stopping all...", "log-info");
     try {
         await fetch("/api/stop", { method: "POST" });
         addLog("Stopped", "log-info");
@@ -335,12 +374,18 @@ function updateChatTabDot(s) {
 // ==================== ENVIRONMENT PROFILE ===============================
 // ========================================================================
 const PROFILE_KEY = "envProfile";
+const DETECTED_BLOCK_HEADER = "Detected tools:";
+let latestEnvironmentDetection = null;
+const profileDetectBtn = $("profileDetect");
+const profileApplyDetectBtn = $("profileApplyDetect");
+const profileCopyDetectBtn = $("profileCopyDetect");
+const profileDetectPanel = $("profileDetectPanel");
 function loadProfile() {
     const raw = localStorage.getItem(PROFILE_KEY);
     const def = {
         shell: "powershell", os: "Windows",
         python_version: "", package_manager: "uv",
-        naming_convention: "", custom_rules: "",
+        naming_convention: "", custom_rules: "", detected_summary: "",
     };
     if (!raw)
         return def;
@@ -351,14 +396,41 @@ function loadProfile() {
         return def;
     }
 }
+function stripDetectedToolsBlock(rules) {
+    const lines = rules.split("\n");
+    const idx = lines.findIndex(line => line.trim() === DETECTED_BLOCK_HEADER);
+    return (idx === -1 ? rules : lines.slice(0, idx).join("\n")).trim();
+}
+function extractDetectedSummary(rules) {
+    const lines = rules.split("\n");
+    const idx = lines.findIndex(line => line.trim() === DETECTED_BLOCK_HEADER);
+    if (idx === -1)
+        return "";
+    return lines
+        .slice(idx + 1)
+        .map(line => line.trim().replace(/^-+\s*/, ""))
+        .filter(Boolean)
+        .slice(0, 15)
+        .join("\n");
+}
+function mergeDetectedToolsBlock(rules, summary) {
+    const base = stripDetectedToolsBlock(rules);
+    const block = [
+        DETECTED_BLOCK_HEADER,
+        ...summary.split("\n").map(line => `- ${line.replace(/^-+\s*/, "")}`),
+    ].join("\n");
+    return [base, block].filter(Boolean).join("\n\n");
+}
 function saveProfile() {
+    const rawRules = ($("prof-rules")).value.trim();
     const p = {
         shell: ($("prof-shell")).value,
         os: ($("prof-os")).value,
         python_version: ($("prof-python")).value.trim(),
         package_manager: ($("prof-pkg")).value,
         naming_convention: ($("prof-naming")).value.trim(),
-        custom_rules: ($("prof-rules")).value.trim(),
+        custom_rules: rawRules,
+        detected_summary: extractDetectedSummary(rawRules),
     };
     localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
     const saved = $("profileSaved");
@@ -374,7 +446,115 @@ function hydrateProfileForm() {
     ($("prof-naming")).value = p.naming_convention;
     ($("prof-rules")).value = p.custom_rules;
 }
+function selectHasValue(select, value) {
+    return Array.from(select.options).some(opt => opt.value === value);
+}
+function toolSummaryLine(detected, key, label) {
+    const tool = detected.tools[key];
+    if (!tool || !tool.found)
+        return `${label}: not found`;
+    return `${label}: ${tool.version || "found"}`;
+}
+function buildDetectedSummary(detected) {
+    const osDetails = detected.os.distro || detected.os.platform || detected.os.name;
+    const lines = [
+        `OS: ${detected.os.name}${osDetails && osDetails !== detected.os.name ? ` (${osDetails})` : ""}`,
+        `Shell: ${detected.shell.guess}`,
+        toolSummaryLine(detected, "python", "Python"),
+        toolSummaryLine(detected, "uv", "uv"),
+        toolSummaryLine(detected, "pip", "pip"),
+        toolSummaryLine(detected, "node", "Node"),
+        toolSummaryLine(detected, "npm", "npm"),
+        toolSummaryLine(detected, "pnpm", "pnpm"),
+        toolSummaryLine(detected, "yarn", "yarn"),
+        toolSummaryLine(detected, "java", "Java"),
+        toolSummaryLine(detected, "javac", "javac"),
+        toolSummaryLine(detected, "git", "Git"),
+        toolSummaryLine(detected, "docker", "Docker"),
+        toolSummaryLine(detected, "go", "Go"),
+        toolSummaryLine(detected, "rustc", "Rust"),
+        toolSummaryLine(detected, "cargo", "Cargo"),
+        toolSummaryLine(detected, "dotnet", ".NET"),
+    ];
+    return lines.slice(0, 15).join("\n");
+}
+function chooseDetectedPackageManager(detected, current) {
+    for (const name of ["uv", "pip", "npm"]) {
+        if (detected.tools[name]?.found)
+            return name;
+    }
+    return current;
+}
+async function detectProfileEnvironment() {
+    const originalText = profileDetectBtn.textContent || "Auto-detect";
+    profileDetectBtn.disabled = true;
+    profileDetectBtn.textContent = "Detecting...";
+    profileDetectPanel.classList.add("show");
+    profileDetectPanel.textContent = "Detecting environment...";
+    try {
+        const r = await fetch("/api/environment/detect");
+        const data = await r.json();
+        if (!r.ok)
+            throw new Error(data.detail || `HTTP ${r.status}`);
+        latestEnvironmentDetection = data;
+        profileDetectPanel.textContent = JSON.stringify(data, null, 2);
+        profileApplyDetectBtn.style.display = "";
+        profileCopyDetectBtn.style.display = "";
+        addLog("Environment detection loaded", "log-info");
+    }
+    catch (e) {
+        latestEnvironmentDetection = null;
+        const msg = e instanceof Error ? e.message : String(e);
+        profileDetectPanel.textContent = `Environment detection failed: ${msg}`;
+        profileApplyDetectBtn.style.display = "none";
+        addLog("Environment detection failed: " + msg, "log-error");
+    }
+    finally {
+        profileDetectBtn.disabled = false;
+        profileDetectBtn.textContent = originalText;
+    }
+}
+function applyDetectedProfile() {
+    if (!latestEnvironmentDetection)
+        return;
+    const detected = latestEnvironmentDetection;
+    const shellSelect = $("prof-shell");
+    const osSelect = $("prof-os");
+    const pkgSelect = $("prof-pkg");
+    const shellGuess = detected.shell.guess;
+    const osName = detected.os.name;
+    if (selectHasValue(shellSelect, shellGuess))
+        shellSelect.value = shellGuess;
+    if (selectHasValue(osSelect, osName))
+        osSelect.value = osName;
+    if (detected.tools.python?.found && detected.tools.python.version) {
+        ($("prof-python")).value = detected.tools.python.version;
+    }
+    const pkg = chooseDetectedPackageManager(detected, pkgSelect.value);
+    if (selectHasValue(pkgSelect, pkg))
+        pkgSelect.value = pkg;
+    const summary = buildDetectedSummary(detected);
+    const rulesEl = $("prof-rules");
+    rulesEl.value = mergeDetectedToolsBlock(rulesEl.value, summary);
+    saveProfile();
+    addLog("Detected environment applied to Profile", "log-info");
+}
+async function copyDetectedEnvironment() {
+    if (!profileDetectPanel.textContent)
+        return;
+    try {
+        await navigator.clipboard.writeText(profileDetectPanel.textContent);
+        addLog("Environment detection copied to clipboard", "log-info");
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        addLog("Copy environment detection failed: " + msg, "log-error");
+    }
+}
 $("profileSave").addEventListener("click", saveProfile);
+profileDetectBtn.addEventListener("click", detectProfileEnvironment);
+profileApplyDetectBtn.addEventListener("click", applyDetectedProfile);
+profileCopyDetectBtn.addEventListener("click", copyDetectedEnvironment);
 ["prof-shell", "prof-os", "prof-python", "prof-pkg", "prof-naming", "prof-rules"].forEach(id => {
     $(id).addEventListener("change", saveProfile);
 });
@@ -390,9 +570,14 @@ function profileToSystemPrompt(p) {
         parts.push(`- Package manager: ${p.package_manager}`);
     if (p.naming_convention)
         parts.push(`- Naming: ${p.naming_convention}`);
-    if (p.custom_rules) {
+    if (p.detected_summary) {
+        parts.push(`\nDetected tools:`);
+        p.detected_summary.split("\n").map(s => s.trim()).filter(Boolean).slice(0, 15).forEach(r => parts.push(`- ${r}`));
+    }
+    const userRules = stripDetectedToolsBlock(p.custom_rules || "");
+    if (userRules) {
         parts.push(`\nUser rules (follow strictly):`);
-        p.custom_rules.split("\n").map(s => s.trim()).filter(Boolean).forEach(r => parts.push(`- ${r}`));
+        userRules.split("\n").map(s => s.trim()).filter(Boolean).forEach(r => parts.push(`- ${r}`));
     }
     parts.push(`\nAlways produce commands for the shell above. Prefer tagged code fences (\`\`\`${p.shell}).`);
     return parts.join("\n");
@@ -411,14 +596,14 @@ let chatHistoryArr = [];
 let streaming = false;
 let blockCounter = 0;
 let stepCounter = 0;
-// ===== Phase 2.5 — Consolidation Pass state =====
+// ===== Phase 2.5 - Consolidation Pass state =====
 let currentTurnPatches = [];
 let lastConsolidationSummary = null;
 let consolidationDebounceTimer = null;
 // Versioned history: each successful consolidation appends a ConsolidationEntry
 let consolidationHistory = [];
 let consolidationVersionCounter = 0;
-// Smart-threshold values — loaded from backend at init, updated via UI
+// Smart-threshold values - loaded from backend at init, updated via UI
 let consolidationPatchThreshold = 8;
 let consolidationTokenThreshold = 12000;
 function loadHistory() {
@@ -435,12 +620,12 @@ function loadHistory() {
 function persistHistory() { sessionStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistoryArr)); }
 function checkChatReadiness() {
     if (!lastStatus || !lastStatus.a.running || !lastStatus.a.healthy) {
-        chatBanner.textContent = "⚠ Main Model (A) is not running. Go to Launcher tab and Start.";
+        chatBanner.textContent = "Main Model (A) is not running. Go to Launcher tab and Start.";
         chatBanner.classList.add("show");
         chatSend.disabled = true;
     }
     else if (usePatcher.checked && (!lastStatus.b.running || !lastStatus.b.healthy)) {
-        chatBanner.textContent = "ℹ Chat will work, but patcher (B) is offline — inline fixes disabled.";
+        chatBanner.textContent = "Chat will work, but patcher (B) is offline - inline fixes disabled.";
         chatBanner.classList.add("show");
         chatSend.disabled = false;
     }
@@ -495,17 +680,17 @@ function renderAssistantContent(container, markdown) {
         wrap.dataset.original = content;
         const header = document.createElement("div");
         header.className = "code-block-header";
-        header.innerHTML = `<span class="lang">${lang || "code"} · ${blockId}</span>
+        header.innerHTML = `<span class="lang">${lang || "code"} - ${blockId}</span>
       <span class="actions-small">
         <button class="btn-copy" title="Copy">Copy</button>
-        <button class="btn-problem" title="I have a problem with this">⚠ Problem?</button>
+        <button class="btn-problem" title="I have a problem with this">Problem?</button>
       </span>`;
         wrap.appendChild(header);
         pre.replaceWith(wrap);
         wrap.appendChild(pre);
         const problemBar = document.createElement("div");
         problemBar.className = "btn-problem-bar";
-        problemBar.innerHTML = `<button>⚠ Got an error with this command? Click to fix with patcher</button>`;
+        problemBar.innerHTML = `<button>Got an error with this command? Click to fix with patcher</button>`;
         wrap.appendChild(problemBar);
         header.querySelector(".btn-copy").addEventListener("click", () => {
             navigator.clipboard.writeText(codeEl.textContent || "");
@@ -527,7 +712,7 @@ function renderAssistantContent(container, markdown) {
         });
     }
     else {
-        console.log("[step-extractor] patcher skipped — B not healthy or disabled");
+        console.log("[step-extractor] patcher skipped - B not healthy or disabled");
     }
     return patchPromises;
 }
@@ -562,7 +747,7 @@ async function runInlinePatch(wrap, profile) {
         original,
         "```",
         ``,
-        `If the command needs rewriting for the user's shell (${profile.shell}) or rules, respond with ONLY the corrected command — no markdown fences, no explanation. If no change is needed, respond with the single word: UNCHANGED`,
+        `If the command needs rewriting for the user's shell (${profile.shell}) or rules, respond with ONLY the corrected command - no markdown fences, no explanation. If no change is needed, respond with the single word: UNCHANGED`,
     ].join("\n");
     console.log(`[patcher] inline: blockId=${wrap.dataset.blockId} lang=${lang}`);
     try {
@@ -593,13 +778,13 @@ async function runInlinePatch(wrap, profile) {
             console.warn("[patcher] inline: reply too short, skipping");
             return;
         }
-        applyPatch(wrap, cleaned, `auto-translated → ${profile.shell}`, "inline");
+        applyPatch(wrap, cleaned, `auto-translated to ${profile.shell}`, "inline");
     }
     catch (e) {
         console.error("[patcher] inline error:", e);
     }
 }
-// applyPatch — mutates block content, records the patch for Consolidation Pass, attaches undo badge.
+// applyPatch mutates block content, records the patch for Consolidation Pass, and attaches an undo badge.
 function applyPatch(wrap, newContent, badgeText, source = "inline") {
     const pre = wrap.querySelector("pre");
     const code = pre.querySelector("code");
@@ -615,7 +800,7 @@ function applyPatch(wrap, newContent, badgeText, source = "inline") {
     wrap.querySelector(".patch-badge")?.remove();
     const badge = document.createElement("div");
     badge.className = "patch-badge";
-    badge.innerHTML = `<span>✓ ${badgeText}</span><button class="btn-undo">↶ undo</button>`;
+    badge.innerHTML = `<span>${badgeText}</span><button class="btn-undo">undo</button>`;
     wrap.appendChild(badge);
     badge.querySelector(".btn-undo").addEventListener("click", () => {
         code.textContent = wrap.dataset.original || "";
@@ -651,7 +836,7 @@ function scheduleConsolidationAfterErrorPopup(wrap) {
 function escHtml(s) {
     return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
-// Rough token estimate — mirrors consolidation.py estimate_tokens()
+// Rough token estimate - mirrors consolidation.py estimate_tokens()
 function estimateTokens(patches) {
     return patches.reduce((sum, p) => sum + Math.floor((p.original.length + p.patched.length) / 4), 0);
 }
@@ -659,7 +844,7 @@ function estimateTokens(patches) {
 function buildConsolidationContext(data) {
     const modeLabel = data.mode === "full" ? "Consolidation Pass" : "Lightweight Patch Summary";
     const lines = [
-        `[${modeLabel} — ${data.patch_count} patch(es) applied to the previous response]`,
+        `[${modeLabel} - ${data.patch_count} patch(es) applied to the previous response]`,
         "",
         data.summary,
     ];
@@ -667,7 +852,7 @@ function buildConsolidationContext(data) {
         lines.push("", `Environment notes: ${data.state_delta}`);
     if (data.changed_steps.length > 0) {
         lines.push("", "Changed blocks:");
-        data.changed_steps.forEach(s => lines.push(`  • ${s.step_id}: ${s.reason}`));
+        data.changed_steps.forEach(s => lines.push(`  - ${s.step_id}: ${s.reason}`));
     }
     return lines.join("\n");
 }
@@ -690,7 +875,7 @@ function rollbackConsolidation(n, triggeredBy) {
     const newStart = consolidationHistory.length > 0
         ? consolidationHistory[consolidationHistory.length - 1].version
         : 0;
-    // Build rollback notice — always injected into next turn's system prompt
+    // Build rollback notice - always injected into next turn's system prompt
     const notice = `[CONSOLIDATION UPDATE: Blocks v${firstV} to v${lastV} have been rolled back by ${triggeredBy}. Current consolidation history now starts from v${newStart}.]`;
     // Combine notice with the current top of history (if any), or use notice alone
     if (consolidationHistory.length > 0) {
@@ -700,7 +885,7 @@ function rollbackConsolidation(n, triggeredBy) {
     else {
         lastConsolidationSummary = notice;
     }
-    const logMsg = `Consolidation rollback: removed v${firstV}–v${lastV} (triggered by ${triggeredBy})`;
+    const logMsg = `Consolidation rollback: removed v${firstV}-${lastV} (triggered by ${triggeredBy})`;
     addLog(logMsg, "log-info");
     console.log(`[consolidation] ${logMsg}`);
     syncUndoBtn();
@@ -716,7 +901,7 @@ function checkForRollbackCommand(text) {
 async function runConsolidationPass(asstDiv, patches) {
     const patcherReady = lastStatus?.b.running && lastStatus.b.healthy && usePatcher.checked;
     if (!patcherReady) {
-        console.log("[consolidation] skipped — patcher not ready");
+        console.log("[consolidation] skipped - patcher not ready");
         return;
     }
     if (!patches.length)
@@ -750,16 +935,16 @@ async function runConsolidationPass(asstDiv, patches) {
         consolidationHistory.push(entry);
         lastConsolidationSummary = builtSummary;
         syncUndoBtn();
-        // ── Badge ──────────────────────────────────────────────────────────────
+        // Badge
         const modeLabel = data.mode === "lightweight" ? "Lightweight Summary" : "Consolidation Pass";
         const badge = document.createElement("div");
         badge.className = "consolidation-badge";
         badge.innerHTML =
-            `<span class="consolidation-icon">⚡</span>` +
-                `<span class="consolidation-text">v${consolidationVersionCounter} · ${modeLabel}: ${patches.length} change(s) summarized</span>` +
+            `<span class="consolidation-icon">*</span>` +
+                `<span class="consolidation-text">v${consolidationVersionCounter} - ${modeLabel}: ${patches.length} change(s) summarized</span>` +
                 `<button class="consolidation-details-btn">Details</button>`;
         asstDiv.appendChild(badge);
-        // ── Details panel ──────────────────────────────────────────────────────
+        // Details panel
         const details = document.createElement("div");
         details.className = "consolidation-details";
         details.style.display = "none";
@@ -840,12 +1025,12 @@ errSubmit.addEventListener("click", async () => {
         "```",
         ``,
         `Propose a concrete fix. Respond with two sections: `,
-        `1. "Fix:" — a one-line fixed command (no fences)`,
-        `2. "Why:" — one short sentence`,
+        `1. "Fix:" - a one-line fixed command (no fences)`,
+        `2. "Why:" - one short sentence`,
     ].join("\n");
     console.log("[patcher] error-popup prompt:\n" + prompt);
     errSubmit.disabled = true;
-    errSubmit.textContent = "Thinking…";
+    errSubmit.textContent = "Thinking...";
     try {
         const r = await fetch("/api/chat/patcher", {
             method: "POST", headers: { "Content-Type": "application/json" },
@@ -874,7 +1059,7 @@ errSubmit.addEventListener("click", async () => {
         box.innerHTML = `<div style="color:#86efac;font-weight:600;margin-bottom:4px">Proposed fix</div>
       <pre></pre>
       ${why ? `<div style="color:#aaa;font-size:12px">${why.replace(/</g, "&lt;")}</div>` : ""}
-      <div style="margin-top:8px"><button class="err-btn-apply">✓ Apply to block</button></div>`;
+      <div style="margin-top:8px"><button class="err-btn-apply">Apply to block</button></div>`;
         box.querySelector("pre").textContent = fix;
         errFixContainer.appendChild(box);
         // Pass "error_popup" source so consolidation record distinguishes manual fixes
@@ -909,7 +1094,7 @@ async function sendMessage() {
     chatHistoryArr.push(asstMsg);
     const asstDiv = renderMessage(asstMsg);
     const asstContent = asstDiv.querySelector(".msg-content");
-    asstContent.textContent = "…";
+    asstContent.textContent = "...";
     streaming = true;
     chatSend.disabled = true;
     const profile = loadProfile();
@@ -1054,7 +1239,7 @@ if (consolidationEnabledToggle) {
         localStorage.setItem("consolidationEnabled", String(consolidationEnabledToggle.checked));
     });
 }
-// ── Consolidation: load thresholds from backend, wire up threshold inputs and Undo button ──
+// Consolidation: load thresholds from backend, wire up threshold inputs and Undo button.
 (async () => {
     try {
         const r = await fetch("/api/consolidation/config");
@@ -1070,7 +1255,7 @@ if (consolidationEnabledToggle) {
                 tokenInput.value = String(consolidationTokenThreshold);
         }
     }
-    catch (_) { /* backend not running yet — use defaults */ }
+    catch (_) { /* backend not running yet - use defaults */ }
 })();
 // Save threshold changes to backend and localStorage
 async function saveConsolidationThresholds() {

@@ -1,6 +1,6 @@
-// app.ts — Compile: npx tsc --target ES2020 --lib ES2020,DOM --strict --outDir . app.ts
+// app.ts - Compile: npx tsc --target ES2020 --lib ES2020,DOM --strict --outDir static static/app.ts
 
-// External globals from CDN
+// External globals from static/vendor
 declare const marked: { parse(md: string): string };
 declare const DOMPurify: { sanitize(html: string): string };
 
@@ -11,12 +11,20 @@ interface StatusResponse { a: ModelStatus; b: ModelStatus; }
 interface EnvProfile {
   shell: string; os: string;
   python_version: string; package_manager: string;
-  naming_convention: string; custom_rules: string;
+  naming_convention: string; custom_rules: string; detected_summary?: string;
 }
 
 interface ChatMessage { role: "user" | "assistant" | "system"; content: string; }
 
-// Phase 2.5 — Consolidation Pass types
+interface ToolDetection { found: boolean; version: string; }
+interface EnvironmentDetection {
+  app_version: string;
+  os: { name: string; platform: string; release: string; distro: string };
+  shell: { guess: string };
+  tools: Record<string, ToolDetection>;
+}
+
+// Phase 2.5 - Consolidation Pass types
 interface PatchEntry {
   block_id: string;
   lang: string;
@@ -79,8 +87,11 @@ const stopBtn    = $<HTMLButtonElement>("stopBtn");
 const chatABtn   = $<HTMLButtonElement>("chatA");
 const chatBBtn   = $<HTMLButtonElement>("chatB");
 const consoleDiv = $<HTMLDivElement>("console");
+const diagnosticsBtn     = $<HTMLButtonElement>("diagnosticsBtn");
+const copyDiagnosticsBtn = $<HTMLButtonElement>("copyDiagnosticsBtn");
+const diagnosticsPanel   = $<HTMLPreElement>("diagnosticsPanel");
 
-// Cloud / provider elements — Model A
+// Cloud / provider elements - Model A
 const providerA         = $<HTMLSelectElement>("providerA");
 const localFieldsA      = $<HTMLDivElement>("localFieldsA");
 const cloudFieldsA      = $<HTMLDivElement>("cloudFieldsA");
@@ -89,7 +100,7 @@ const customModelFieldA = $<HTMLDivElement>("customModelFieldA");
 const customModelA      = $<HTMLInputElement>("customModelA");
 const apiKeyA           = $<HTMLInputElement>("apiKeyA");
 
-// Cloud / provider elements — Model B
+// Cloud / provider elements - Model B
 const providerB         = $<HTMLSelectElement>("providerB");
 const localFieldsB      = $<HTMLDivElement>("localFieldsB");
 const cloudFieldsB      = $<HTMLDivElement>("cloudFieldsB");
@@ -104,19 +115,19 @@ const CLOUD_MODELS: Record<string, {value: string; label: string}[]> = {
     {value: "gpt-4o-mini", label: "GPT-4o mini"},
     {value: "o3",          label: "o3"},
     {value: "o4-mini",     label: "o4-mini"},
-    {value: "__custom__",  label: "Custom model ID…"},
+    {value: "__custom__",  label: "Custom model ID..."},
   ],
   anthropic: [
     {value: "claude-opus-4-7",           label: "Claude Opus 4.7"},
     {value: "claude-sonnet-4-6",         label: "Claude Sonnet 4.6"},
     {value: "claude-haiku-4-5-20251001", label: "Claude Haiku 4.5"},
-    {value: "__custom__",                label: "Custom model ID…"},
+    {value: "__custom__",                label: "Custom model ID..."},
   ],
   groq: [
     {value: "llama-3.3-70b-versatile",   label: "Llama 3.3 70B"},
     {value: "llama-3.1-8b-instant",      label: "Llama 3.1 8B (fast)"},
     {value: "mixtral-8x7b-32768",        label: "Mixtral 8x7B"},
-    {value: "__custom__",                label: "Custom model ID…"},
+    {value: "__custom__",                label: "Custom model ID..."},
   ],
 };
 
@@ -183,7 +194,7 @@ function applyStatus(s: ModelStatus, dot: HTMLSpanElement, label: HTMLDivElement
     : s.vram_error ? "VRAM Error"
     : s.healthy
       ? (s.provider === "local" ? `Running (pid ${s.pid})` : `Ready (${s.provider})`)
-      : "Starting…";
+      : "Starting...";
   chatBtn.style.display = (s.running && s.healthy && s.provider === "local") ? "block" : "none";
 }
 
@@ -229,7 +240,33 @@ $("browseA").addEventListener("click",   () => browseFile("model",  pathA,    "M
 $("browseB").addEventListener("click",   () => browseFile("model",  pathB,    "Model B: "));
 $("browseBin").addEventListener("click", () => browseFile("binary", llamaPath,"llama-server: "));
 
-// In VS Code webview (iframe), window.open is blocked — hide these buttons entirely
+async function loadDiagnostics(copy = false): Promise<void> {
+  try {
+    const r = await fetch("/api/diagnostics");
+    const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
+    const text = JSON.stringify(data, null, 2);
+    diagnosticsPanel.textContent = text;
+    diagnosticsPanel.classList.add("show");
+    copyDiagnosticsBtn.style.display = "";
+    if (copy) {
+      await navigator.clipboard.writeText(text);
+      addLog("Diagnostics copied to clipboard", "log-info");
+    } else {
+      addLog("Diagnostics loaded", "log-info");
+    }
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    diagnosticsPanel.textContent = `Diagnostics failed: ${msg}`;
+    diagnosticsPanel.classList.add("show");
+    addLog("Diagnostics failed: " + msg, "log-error");
+  }
+}
+
+diagnosticsBtn.addEventListener("click", () => loadDiagnostics(false));
+copyDiagnosticsBtn.addEventListener("click", () => loadDiagnostics(true));
+
+// In VS Code webview (iframe), window.open is blocked; hide these buttons entirely.
 if (IS_VSCODE) {
   chatABtn.style.display = "none";
   chatBBtn.style.display = "none";
@@ -241,7 +278,7 @@ if (IS_VSCODE) {
 // ===== Provider UI helpers =====
 function populateCloudModels(select: HTMLSelectElement, provider: string): void {
   select.innerHTML = "";
-  const models = CLOUD_MODELS[provider] || [{value: "__custom__", label: "Custom model ID…"}];
+  const models = CLOUD_MODELS[provider] || [{value: "__custom__", label: "Custom model ID..."}];
   models.forEach(m => {
     const opt = document.createElement("option");
     opt.value = m.value; opt.textContent = m.label;
@@ -284,7 +321,7 @@ startBtn.addEventListener("click", async () => {
   if (!isLocalA && !apiKeyA.value.trim()) { addLog("Enter API key for Model A", "log-error"); return; }
   saveLauncherSettings();
   startBtn.disabled = true;
-  addLog("Starting…", "log-info");
+  addLog("Starting...", "log-info");
 
   const cloudModelA = cloudModelSelectA.value === "__custom__" ? customModelA.value.trim() : cloudModelSelectA.value;
   const cloudModelB = cloudModelSelectB.value === "__custom__" ? customModelB.value.trim() : cloudModelSelectB.value;
@@ -320,7 +357,7 @@ startBtn.addEventListener("click", async () => {
 });
 
 stopBtn.addEventListener("click", async () => {
-  addLog("Stopping all…", "log-info");
+  addLog("Stopping all...", "log-info");
   try { await fetch("/api/stop", { method: "POST" }); addLog("Stopped", "log-info"); ws?.close(); ws = null; }
   catch (e) { addLog("Stop failed: " + e, "log-error"); }
 });
@@ -358,26 +395,63 @@ function updateChatTabDot(s: StatusResponse): void {
 // ==================== ENVIRONMENT PROFILE ===============================
 // ========================================================================
 const PROFILE_KEY = "envProfile";
+const DETECTED_BLOCK_HEADER = "Detected tools:";
+
+let latestEnvironmentDetection: EnvironmentDetection | null = null;
+
+const profileDetectBtn = $<HTMLButtonElement>("profileDetect");
+const profileApplyDetectBtn = $<HTMLButtonElement>("profileApplyDetect");
+const profileCopyDetectBtn = $<HTMLButtonElement>("profileCopyDetect");
+const profileDetectPanel = $<HTMLPreElement>("profileDetectPanel");
 
 function loadProfile(): EnvProfile {
   const raw = localStorage.getItem(PROFILE_KEY);
   const def: EnvProfile = {
     shell: "powershell", os: "Windows",
     python_version: "", package_manager: "uv",
-    naming_convention: "", custom_rules: "",
+    naming_convention: "", custom_rules: "", detected_summary: "",
   };
   if (!raw) return def;
   try { return { ...def, ...JSON.parse(raw) }; } catch { return def; }
 }
 
+function stripDetectedToolsBlock(rules: string): string {
+  const lines = rules.split("\n");
+  const idx = lines.findIndex(line => line.trim() === DETECTED_BLOCK_HEADER);
+  return (idx === -1 ? rules : lines.slice(0, idx).join("\n")).trim();
+}
+
+function extractDetectedSummary(rules: string): string {
+  const lines = rules.split("\n");
+  const idx = lines.findIndex(line => line.trim() === DETECTED_BLOCK_HEADER);
+  if (idx === -1) return "";
+  return lines
+    .slice(idx + 1)
+    .map(line => line.trim().replace(/^-+\s*/, ""))
+    .filter(Boolean)
+    .slice(0, 15)
+    .join("\n");
+}
+
+function mergeDetectedToolsBlock(rules: string, summary: string): string {
+  const base = stripDetectedToolsBlock(rules);
+  const block = [
+    DETECTED_BLOCK_HEADER,
+    ...summary.split("\n").map(line => `- ${line.replace(/^-+\s*/, "")}`),
+  ].join("\n");
+  return [base, block].filter(Boolean).join("\n\n");
+}
+
 function saveProfile(): void {
+  const rawRules = ($<HTMLTextAreaElement>("prof-rules")).value.trim();
   const p: EnvProfile = {
     shell:             ($<HTMLSelectElement>("prof-shell")).value,
     os:                ($<HTMLSelectElement>("prof-os")).value,
     python_version:    ($<HTMLInputElement>("prof-python")).value.trim(),
     package_manager:   ($<HTMLSelectElement>("prof-pkg")).value,
     naming_convention: ($<HTMLInputElement>("prof-naming")).value.trim(),
-    custom_rules:      ($<HTMLTextAreaElement>("prof-rules")).value.trim(),
+    custom_rules:      rawRules,
+    detected_summary:  extractDetectedSummary(rawRules),
   };
   localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
   const saved = $<HTMLSpanElement>("profileSaved");
@@ -395,7 +469,113 @@ function hydrateProfileForm(): void {
   ($<HTMLTextAreaElement>("prof-rules")).value = p.custom_rules;
 }
 
+function selectHasValue(select: HTMLSelectElement, value: string): boolean {
+  return Array.from(select.options).some(opt => opt.value === value);
+}
+
+function toolSummaryLine(detected: EnvironmentDetection, key: string, label: string): string {
+  const tool = detected.tools[key];
+  if (!tool || !tool.found) return `${label}: not found`;
+  return `${label}: ${tool.version || "found"}`;
+}
+
+function buildDetectedSummary(detected: EnvironmentDetection): string {
+  const osDetails = detected.os.distro || detected.os.platform || detected.os.name;
+  const lines = [
+    `OS: ${detected.os.name}${osDetails && osDetails !== detected.os.name ? ` (${osDetails})` : ""}`,
+    `Shell: ${detected.shell.guess}`,
+    toolSummaryLine(detected, "python", "Python"),
+    toolSummaryLine(detected, "uv", "uv"),
+    toolSummaryLine(detected, "pip", "pip"),
+    toolSummaryLine(detected, "node", "Node"),
+    toolSummaryLine(detected, "npm", "npm"),
+    toolSummaryLine(detected, "pnpm", "pnpm"),
+    toolSummaryLine(detected, "yarn", "yarn"),
+    toolSummaryLine(detected, "java", "Java"),
+    toolSummaryLine(detected, "javac", "javac"),
+    toolSummaryLine(detected, "git", "Git"),
+    toolSummaryLine(detected, "docker", "Docker"),
+    toolSummaryLine(detected, "go", "Go"),
+    toolSummaryLine(detected, "rustc", "Rust"),
+    toolSummaryLine(detected, "cargo", "Cargo"),
+    toolSummaryLine(detected, "dotnet", ".NET"),
+  ];
+  return lines.slice(0, 15).join("\n");
+}
+
+function chooseDetectedPackageManager(detected: EnvironmentDetection, current: string): string {
+  for (const name of ["uv", "pip", "npm"]) {
+    if (detected.tools[name]?.found) return name;
+  }
+  return current;
+}
+
+async function detectProfileEnvironment(): Promise<void> {
+  const originalText = profileDetectBtn.textContent || "Auto-detect";
+  profileDetectBtn.disabled = true;
+  profileDetectBtn.textContent = "Detecting...";
+  profileDetectPanel.classList.add("show");
+  profileDetectPanel.textContent = "Detecting environment...";
+  try {
+    const r = await fetch("/api/environment/detect");
+    const data: EnvironmentDetection = await r.json();
+    if (!r.ok) throw new Error((data as any).detail || `HTTP ${r.status}`);
+    latestEnvironmentDetection = data;
+    profileDetectPanel.textContent = JSON.stringify(data, null, 2);
+    profileApplyDetectBtn.style.display = "";
+    profileCopyDetectBtn.style.display = "";
+    addLog("Environment detection loaded", "log-info");
+  } catch (e) {
+    latestEnvironmentDetection = null;
+    const msg = e instanceof Error ? e.message : String(e);
+    profileDetectPanel.textContent = `Environment detection failed: ${msg}`;
+    profileApplyDetectBtn.style.display = "none";
+    addLog("Environment detection failed: " + msg, "log-error");
+  } finally {
+    profileDetectBtn.disabled = false;
+    profileDetectBtn.textContent = originalText;
+  }
+}
+
+function applyDetectedProfile(): void {
+  if (!latestEnvironmentDetection) return;
+  const detected = latestEnvironmentDetection;
+  const shellSelect = $<HTMLSelectElement>("prof-shell");
+  const osSelect = $<HTMLSelectElement>("prof-os");
+  const pkgSelect = $<HTMLSelectElement>("prof-pkg");
+  const shellGuess = detected.shell.guess;
+  const osName = detected.os.name;
+
+  if (selectHasValue(shellSelect, shellGuess)) shellSelect.value = shellGuess;
+  if (selectHasValue(osSelect, osName)) osSelect.value = osName;
+  if (detected.tools.python?.found && detected.tools.python.version) {
+    ($<HTMLInputElement>("prof-python")).value = detected.tools.python.version;
+  }
+  const pkg = chooseDetectedPackageManager(detected, pkgSelect.value);
+  if (selectHasValue(pkgSelect, pkg)) pkgSelect.value = pkg;
+
+  const summary = buildDetectedSummary(detected);
+  const rulesEl = $<HTMLTextAreaElement>("prof-rules");
+  rulesEl.value = mergeDetectedToolsBlock(rulesEl.value, summary);
+  saveProfile();
+  addLog("Detected environment applied to Profile", "log-info");
+}
+
+async function copyDetectedEnvironment(): Promise<void> {
+  if (!profileDetectPanel.textContent) return;
+  try {
+    await navigator.clipboard.writeText(profileDetectPanel.textContent);
+    addLog("Environment detection copied to clipboard", "log-info");
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    addLog("Copy environment detection failed: " + msg, "log-error");
+  }
+}
+
 $<HTMLButtonElement>("profileSave").addEventListener("click", saveProfile);
+profileDetectBtn.addEventListener("click", detectProfileEnvironment);
+profileApplyDetectBtn.addEventListener("click", applyDetectedProfile);
+profileCopyDetectBtn.addEventListener("click", copyDetectedEnvironment);
 ["prof-shell","prof-os","prof-python","prof-pkg","prof-naming","prof-rules"].forEach(id => {
   $(id).addEventListener("change", saveProfile);
 });
@@ -409,9 +589,14 @@ function profileToSystemPrompt(p: EnvProfile): string {
   if (p.python_version)    parts.push(`- Python: ${p.python_version}`);
   if (p.package_manager)   parts.push(`- Package manager: ${p.package_manager}`);
   if (p.naming_convention) parts.push(`- Naming: ${p.naming_convention}`);
-  if (p.custom_rules) {
+  if (p.detected_summary) {
+    parts.push(`\nDetected tools:`);
+    p.detected_summary.split("\n").map(s => s.trim()).filter(Boolean).slice(0, 15).forEach(r => parts.push(`- ${r}`));
+  }
+  const userRules = stripDetectedToolsBlock(p.custom_rules || "");
+  if (userRules) {
     parts.push(`\nUser rules (follow strictly):`);
-    p.custom_rules.split("\n").map(s => s.trim()).filter(Boolean).forEach(r => parts.push(`- ${r}`));
+    userRules.split("\n").map(s => s.trim()).filter(Boolean).forEach(r => parts.push(`- ${r}`));
   }
   parts.push(`\nAlways produce commands for the shell above. Prefer tagged code fences (\`\`\`${p.shell}).`);
   return parts.join("\n");
@@ -433,7 +618,7 @@ let streaming    = false;
 let blockCounter = 0;
 let stepCounter  = 0;
 
-// ===== Phase 2.5 — Consolidation Pass state =====
+// ===== Phase 2.5 - Consolidation Pass state =====
 let currentTurnPatches: PatchEntry[] = [];
 let lastConsolidationSummary: string | null = null;
 let consolidationDebounceTimer: ReturnType<typeof setTimeout> | null = null;
@@ -442,7 +627,7 @@ let consolidationDebounceTimer: ReturnType<typeof setTimeout> | null = null;
 let consolidationHistory: ConsolidationEntry[] = [];
 let consolidationVersionCounter = 0;
 
-// Smart-threshold values — loaded from backend at init, updated via UI
+// Smart-threshold values - loaded from backend at init, updated via UI
 let consolidationPatchThreshold = 8;
 let consolidationTokenThreshold = 12000;
 
@@ -458,11 +643,11 @@ function persistHistory(): void { sessionStorage.setItem(HISTORY_KEY, JSON.strin
 
 function checkChatReadiness(): void {
   if (!lastStatus || !lastStatus.a.running || !lastStatus.a.healthy) {
-    chatBanner.textContent = "⚠ Main Model (A) is not running. Go to Launcher tab and Start.";
+    chatBanner.textContent = "Main Model (A) is not running. Go to Launcher tab and Start.";
     chatBanner.classList.add("show");
     chatSend.disabled = true;
   } else if (usePatcher.checked && (!lastStatus.b.running || !lastStatus.b.healthy)) {
-    chatBanner.textContent = "ℹ Chat will work, but patcher (B) is offline — inline fixes disabled.";
+    chatBanner.textContent = "Chat will work, but patcher (B) is offline - inline fixes disabled.";
     chatBanner.classList.add("show");
     chatSend.disabled = false;
   } else {
@@ -522,10 +707,10 @@ function renderAssistantContent(container: HTMLElement, markdown: string): Promi
 
     const header = document.createElement("div");
     header.className = "code-block-header";
-    header.innerHTML = `<span class="lang">${lang || "code"} · ${blockId}</span>
+    header.innerHTML = `<span class="lang">${lang || "code"} - ${blockId}</span>
       <span class="actions-small">
         <button class="btn-copy" title="Copy">Copy</button>
-        <button class="btn-problem" title="I have a problem with this">⚠ Problem?</button>
+        <button class="btn-problem" title="I have a problem with this">Problem?</button>
       </span>`;
 
     wrap.appendChild(header);
@@ -534,7 +719,7 @@ function renderAssistantContent(container: HTMLElement, markdown: string): Promi
 
     const problemBar = document.createElement("div");
     problemBar.className = "btn-problem-bar";
-    problemBar.innerHTML = `<button>⚠ Got an error with this command? Click to fix with patcher</button>`;
+    problemBar.innerHTML = `<button>Got an error with this command? Click to fix with patcher</button>`;
     wrap.appendChild(problemBar);
 
     (header.querySelector(".btn-copy") as HTMLButtonElement).addEventListener("click", () => {
@@ -558,7 +743,7 @@ function renderAssistantContent(container: HTMLElement, markdown: string): Promi
       if (COMMAND_LANGS.has(lang)) patchPromises.push(runInlinePatch(wrap, profile));
     });
   } else {
-    console.log("[step-extractor] patcher skipped — B not healthy or disabled");
+    console.log("[step-extractor] patcher skipped - B not healthy or disabled");
   }
   return patchPromises;
 }
@@ -591,7 +776,7 @@ async function runInlinePatch(wrap: HTMLDivElement, profile: EnvProfile): Promis
     original,
     "```",
     ``,
-    `If the command needs rewriting for the user's shell (${profile.shell}) or rules, respond with ONLY the corrected command — no markdown fences, no explanation. If no change is needed, respond with the single word: UNCHANGED`,
+    `If the command needs rewriting for the user's shell (${profile.shell}) or rules, respond with ONLY the corrected command - no markdown fences, no explanation. If no change is needed, respond with the single word: UNCHANGED`,
   ].join("\n");
 
   console.log(`[patcher] inline: blockId=${wrap.dataset.blockId} lang=${lang}`);
@@ -617,13 +802,13 @@ async function runInlinePatch(wrap: HTMLDivElement, profile: EnvProfile): Promis
     }
     const cleaned = reply.replace(/^```\w*\n?/, "").replace(/\n?```$/, "").trim();
     if (cleaned.length < 3) { console.warn("[patcher] inline: reply too short, skipping"); return; }
-    applyPatch(wrap, cleaned, `auto-translated → ${profile.shell}`, "inline");
+    applyPatch(wrap, cleaned, `auto-translated to ${profile.shell}`, "inline");
   } catch (e) {
     console.error("[patcher] inline error:", e);
   }
 }
 
-// applyPatch — mutates block content, records the patch for Consolidation Pass, attaches undo badge.
+// applyPatch mutates block content, records the patch for Consolidation Pass, and attaches an undo badge.
 function applyPatch(wrap: HTMLDivElement, newContent: string, badgeText: string, source = "inline"): void {
   const pre  = wrap.querySelector("pre") as HTMLPreElement;
   const code = pre.querySelector("code") as HTMLElement;
@@ -641,7 +826,7 @@ function applyPatch(wrap: HTMLDivElement, newContent: string, badgeText: string,
   wrap.querySelector(".patch-badge")?.remove();
   const badge = document.createElement("div");
   badge.className = "patch-badge";
-  badge.innerHTML = `<span>✓ ${badgeText}</span><button class="btn-undo">↶ undo</button>`;
+  badge.innerHTML = `<span>${badgeText}</span><button class="btn-undo">undo</button>`;
   wrap.appendChild(badge);
   (badge.querySelector(".btn-undo") as HTMLButtonElement).addEventListener("click", () => {
     code.textContent = wrap.dataset.original || "";
@@ -678,7 +863,7 @@ function escHtml(s: string): string {
   return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
 }
 
-// Rough token estimate — mirrors consolidation.py estimate_tokens()
+// Rough token estimate - mirrors consolidation.py estimate_tokens()
 function estimateTokens(patches: PatchEntry[]): number {
   return patches.reduce((sum, p) => sum + Math.floor((p.original.length + p.patched.length) / 4), 0);
 }
@@ -687,14 +872,14 @@ function estimateTokens(patches: PatchEntry[]): number {
 function buildConsolidationContext(data: ConsolidationResponse): string {
   const modeLabel = data.mode === "full" ? "Consolidation Pass" : "Lightweight Patch Summary";
   const lines = [
-    `[${modeLabel} — ${data.patch_count} patch(es) applied to the previous response]`,
+    `[${modeLabel} - ${data.patch_count} patch(es) applied to the previous response]`,
     "",
     data.summary,
   ];
   if (data.state_delta) lines.push("", `Environment notes: ${data.state_delta}`);
   if (data.changed_steps.length > 0) {
     lines.push("", "Changed blocks:");
-    data.changed_steps.forEach(s => lines.push(`  • ${s.step_id}: ${s.reason}`));
+    data.changed_steps.forEach(s => lines.push(`  - ${s.step_id}: ${s.reason}`));
   }
   return lines.join("\n");
 }
@@ -719,7 +904,7 @@ function rollbackConsolidation(n: number, triggeredBy: "user" | "model"): void {
     ? consolidationHistory[consolidationHistory.length - 1].version
     : 0;
 
-  // Build rollback notice — always injected into next turn's system prompt
+  // Build rollback notice - always injected into next turn's system prompt
   const notice = `[CONSOLIDATION UPDATE: Blocks v${firstV} to v${lastV} have been rolled back by ${triggeredBy}. Current consolidation history now starts from v${newStart}.]`;
 
   // Combine notice with the current top of history (if any), or use notice alone
@@ -730,7 +915,7 @@ function rollbackConsolidation(n: number, triggeredBy: "user" | "model"): void {
     lastConsolidationSummary = notice;
   }
 
-  const logMsg = `Consolidation rollback: removed v${firstV}–v${lastV} (triggered by ${triggeredBy})`;
+  const logMsg = `Consolidation rollback: removed v${firstV}-${lastV} (triggered by ${triggeredBy})`;
   addLog(logMsg, "log-info");
   console.log(`[consolidation] ${logMsg}`);
   syncUndoBtn();
@@ -746,7 +931,7 @@ function checkForRollbackCommand(text: string): number | null {
 
 async function runConsolidationPass(asstDiv: HTMLDivElement, patches: PatchEntry[]): Promise<void> {
   const patcherReady = lastStatus?.b.running && lastStatus.b.healthy && usePatcher.checked;
-  if (!patcherReady) { console.log("[consolidation] skipped — patcher not ready"); return; }
+  if (!patcherReady) { console.log("[consolidation] skipped - patcher not ready"); return; }
   if (!patches.length) return;
 
   const estTokens = estimateTokens(patches);
@@ -780,17 +965,17 @@ async function runConsolidationPass(asstDiv: HTMLDivElement, patches: PatchEntry
     lastConsolidationSummary = builtSummary;
     syncUndoBtn();
 
-    // ── Badge ──────────────────────────────────────────────────────────────
+    // Badge
     const modeLabel = data.mode === "lightweight" ? "Lightweight Summary" : "Consolidation Pass";
     const badge = document.createElement("div");
     badge.className = "consolidation-badge";
     badge.innerHTML =
-      `<span class="consolidation-icon">⚡</span>` +
-      `<span class="consolidation-text">v${consolidationVersionCounter} · ${modeLabel}: ${patches.length} change(s) summarized</span>` +
+      `<span class="consolidation-icon">*</span>` +
+      `<span class="consolidation-text">v${consolidationVersionCounter} - ${modeLabel}: ${patches.length} change(s) summarized</span>` +
       `<button class="consolidation-details-btn">Details</button>`;
     asstDiv.appendChild(badge);
 
-    // ── Details panel ──────────────────────────────────────────────────────
+    // Details panel
     const details = document.createElement("div");
     details.className = "consolidation-details";
     details.style.display = "none";
@@ -872,13 +1057,13 @@ errSubmit.addEventListener("click", async () => {
     "```",
     ``,
     `Propose a concrete fix. Respond with two sections: `,
-    `1. "Fix:" — a one-line fixed command (no fences)`,
-    `2. "Why:" — one short sentence`,
+    `1. "Fix:" - a one-line fixed command (no fences)`,
+    `2. "Why:" - one short sentence`,
   ].join("\n");
 
   console.log("[patcher] error-popup prompt:\n" + prompt);
   errSubmit.disabled = true;
-  errSubmit.textContent = "Thinking…";
+  errSubmit.textContent = "Thinking...";
   try {
     const r = await fetch("/api/chat/patcher", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -907,7 +1092,7 @@ errSubmit.addEventListener("click", async () => {
     box.innerHTML = `<div style="color:#86efac;font-weight:600;margin-bottom:4px">Proposed fix</div>
       <pre></pre>
       ${why ? `<div style="color:#aaa;font-size:12px">${why.replace(/</g,"&lt;")}</div>` : ""}
-      <div style="margin-top:8px"><button class="err-btn-apply">✓ Apply to block</button></div>`;
+      <div style="margin-top:8px"><button class="err-btn-apply">Apply to block</button></div>`;
     (box.querySelector("pre") as HTMLElement).textContent = fix;
     errFixContainer.appendChild(box);
     // Pass "error_popup" source so consolidation record distinguishes manual fixes
@@ -938,7 +1123,7 @@ async function sendMessage(): Promise<void> {
   chatHistoryArr.push(asstMsg);
   const asstDiv     = renderMessage(asstMsg);
   const asstContent = asstDiv.querySelector(".msg-content") as HTMLDivElement;
-  asstContent.textContent = "…";
+  asstContent.textContent = "...";
 
   streaming = true;
   chatSend.disabled = true;
@@ -1081,7 +1266,7 @@ if (consolidationEnabledToggle) {
   });
 }
 
-// ── Consolidation: load thresholds from backend, wire up threshold inputs and Undo button ──
+// Consolidation: load thresholds from backend, wire up threshold inputs and Undo button.
 (async () => {
   try {
     const r = await fetch("/api/consolidation/config");
@@ -1094,7 +1279,7 @@ if (consolidationEnabledToggle) {
       if (patchInput) patchInput.value = String(consolidationPatchThreshold);
       if (tokenInput) tokenInput.value = String(consolidationTokenThreshold);
     }
-  } catch (_) { /* backend not running yet — use defaults */ }
+  } catch (_) { /* backend not running yet - use defaults */ }
 })();
 
 // Save threshold changes to backend and localStorage
