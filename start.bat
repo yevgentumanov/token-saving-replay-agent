@@ -2,6 +2,9 @@
 setlocal enabledelayedexpansion
 cd /d "%~dp0"
 
+set "PYTHONNOUSERSITE=1"
+set "PYTHONUTF8=1"
+
 set "LOGDIR=%~dp0.replay\logs"
 set "STARTUP_LOG=%LOGDIR%\startup.log"
 if not exist "%LOGDIR%" mkdir "%LOGDIR%" 2>nul

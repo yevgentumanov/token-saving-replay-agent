@@ -21,6 +21,50 @@ BASE_DIR = Path(__file__).parent
 if str(BASE_DIR) not in sys.path:
     sys.path.insert(0, str(BASE_DIR))
 
+
+def _isolate_portable_python():
+    """Keep the embedded runtime from importing per-user Python packages."""
+    os.environ.setdefault("PYTHONNOUSERSITE", "1")
+    os.environ.setdefault("PYTHONUTF8", "1")
+    try:
+        import site
+    except Exception:
+        return
+
+    user_sites = []
+    for value in (getattr(site, "USER_SITE", None),):
+        if value:
+            user_sites.append(Path(value))
+    try:
+        value = site.getusersitepackages()
+        if isinstance(value, str):
+            user_sites.append(Path(value))
+        else:
+            user_sites.extend(Path(item) for item in value)
+    except Exception:
+        pass
+
+    resolved_user_sites = set()
+    for path in user_sites:
+        try:
+            resolved_user_sites.add(path.resolve())
+        except Exception:
+            resolved_user_sites.add(path)
+
+    kept_paths = []
+    for path in sys.path:
+        try:
+            resolved = Path(path).resolve()
+        except Exception:
+            resolved = Path(path)
+        if resolved not in resolved_user_sites:
+            kept_paths.append(path)
+    sys.path[:] = kept_paths
+    site.ENABLE_USER_SITE = False
+
+
+_isolate_portable_python()
+
 from app_logging import append_startup_event, get_logger, log_error, log_event, setup_logging
 
 setup_logging()
@@ -83,10 +127,11 @@ def ensure_deps():
 
     req_file = BASE_DIR / "requirements.txt"
     req_hash = hashlib.sha256(req_file.read_bytes()).hexdigest()[:16]
+    marker_value = f"isolated-user-site-v1:{req_hash}"
     append_startup_event("portable.deps.check", requirements=str(req_file), hash=req_hash)
     log_event(logger, "portable.deps.check", requirements=str(req_file), hash=req_hash)
 
-    if DEPS_MARKER.exists() and DEPS_MARKER.read_text().strip() == req_hash:
+    if DEPS_MARKER.exists() and DEPS_MARKER.read_text().strip() == marker_value:
         append_startup_event("portable.deps.ready_marker_found", marker=str(DEPS_MARKER))
         log_event(logger, "portable.deps.ready_marker_found", marker=str(DEPS_MARKER))
         return
@@ -104,13 +149,16 @@ def ensure_deps():
     ]
     append_startup_event("portable.deps.install.start", command=cmd)
     log_event(logger, "portable.deps.install.start", command=cmd)
+    env = os.environ.copy()
+    env["PYTHONNOUSERSITE"] = "1"
+    env["PYTHONUTF8"] = "1"
     try:
-        subprocess.run(cmd, check=True)
+        subprocess.run(cmd, check=True, env=env)
     except Exception as exc:
         append_startup_event("portable.deps.install.failed", error=str(exc))
         log_error(logger, "portable.deps.install.failed", exc)
         raise
-    DEPS_MARKER.write_text(req_hash)
+    DEPS_MARKER.write_text(marker_value)
     append_startup_event("portable.deps.install.done", marker=str(DEPS_MARKER))
     log_event(logger, "portable.deps.install.done", marker=str(DEPS_MARKER))
     print("      Dependencies ready.")
