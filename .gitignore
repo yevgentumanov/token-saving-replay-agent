@@ -33,3 +33,6 @@ internal-doc/
 
 # Claude Code local settings (permissions, etc.)
 .claude/
+
+# Claude Code project instructions (local only)
+CLAUDE.md

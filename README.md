@@ -52,6 +52,7 @@ asks for model files, and opens the app. To switch backend later, delete the
 ## What Works in Alpha
 
 - Browser Launcher for Model A and optional Model B
+- Multi-chat sidebar — manage multiple independent conversations
 - Local llama.cpp models via `llama-server`
 - Optional cloud providers through LiteLLM: OpenAI, Anthropic, Groq
 - Streaming chat from Model A
@@ -123,6 +124,8 @@ Core files:
 - `main.py` - FastAPI backend, process management, API routes
 - `llm_clients.py` - local/cloud LLM abstraction
 - `consolidation.py` - patch summary pass
+- `keeper.py` - concept guardian; reviews proposed architectural changes against `CONCEPT.md`
+- `app_logging.py` - rotating file logger writing to `.replay/logs/`
 - `static/index.html` and `static/app.ts` - browser UI
 - `portable_launcher.py` and `start.bat` - Windows portable launcher
 
@@ -143,13 +146,23 @@ node --check static/app.js
 
 Alpha test suite:
 
+Run the Python tests (unit + smoke + e2e):
+
+```bash
+pytest tests/
+```
+
+Run the full suite including the Playwright browser smoke test:
+
 ```bash
 npm install
+npx playwright install chromium
 npm run test:alpha
 ```
 
-`test:alpha` runs Python unit/smoke tests and a Playwright browser smoke test
-against a temporary local `python main.py` server.
+`test:alpha` runs `python -m unittest discover` followed by `playwright test`,
+which spins up a temporary `python main.py` server and drives the UI with a
+headless Chromium browser.
 
 ## Contributing
 
