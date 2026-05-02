@@ -44,8 +44,10 @@ Windows users can run:
 start.bat
 ```
 
-On first run it downloads portable Python, installs dependencies, downloads a
-pinned CPU build of `llama-server.exe`, asks for model files, and opens the app.
+On first run it downloads portable Python, installs dependencies, detects your
+GPU and asks which `llama-server` backend to download (CUDA / Vulkan / CPU),
+asks for model files, and opens the app. To switch backend later, delete the
+`bin/` folder and re-run.
 
 ## What Works in Alpha
 

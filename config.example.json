@@ -7,6 +7,7 @@
   "model_b_port": 8081,
   "host": "0.0.0.0",
   "llama_server_path": "",
+  "llama_backend": "vulkan",
   "use_patcher": true,
   "model_a_provider": "local",
   "model_a_api_key": "",

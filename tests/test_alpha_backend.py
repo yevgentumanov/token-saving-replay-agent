@@ -1,15 +1,17 @@
 import asyncio
+import json
 import subprocess
 import tempfile
 import unittest
 from pathlib import Path
-from unittest.mock import Mock, patch
+from unittest.mock import AsyncMock, Mock, patch, MagicMock
 
 from fastapi.testclient import TestClient
 
 import consolidation
 import main
 from consolidation import PatchRecord
+from llm_clients import BaseLLMClient
 
 
 class BackendAlphaTests(unittest.TestCase):
@@ -176,6 +178,137 @@ class StaticAlphaTests(unittest.TestCase):
     def test_vendor_assets_exist(self):
         self.assertTrue(Path("static/vendor/marked.min.js").exists())
         self.assertTrue(Path("static/vendor/purify.min.js").exists())
+
+
+class MockLLMClient(BaseLLMClient):
+    """Mock LLM client for smoke testing without real models."""
+
+    async def chat_stream(self, messages: list, **kwargs):
+        """Yield mock SSE response chunks."""
+        response_text = "This is a mock response from the LLM."
+        # Simulate SSE format: "data: {json}\n\n"
+        for i, chunk in enumerate(response_text.split()):
+            sse_chunk = f'data: {{"choices":[{{"delta":{{"content":"{chunk} "}}}}]}}\n\n'.encode()
+            yield sse_chunk
+
+    async def chat_complete(self, messages: list, **kwargs) -> dict:
+        """Return a complete mock response."""
+        return {
+            "choices": [
+                {
+                    "message": {
+                        "content": "This is a complete mock response from the LLM."
+                    }
+                }
+            ]
+        }
+
+    async def health_check(self) -> bool:
+        """Always healthy in mock."""
+        return True
+
+
+class SmokeTests(unittest.TestCase):
+    """Smoke tests verifying core API endpoints and flows."""
+
+    def setUp(self):
+        """Set up test fixtures."""
+        self.client = TestClient(main.app)
+
+    def test_smoke_core_endpoints_return_valid_json(self):
+        """Smoke test: verify all core endpoints return 200 and valid JSON."""
+        endpoints = [
+            "/api/status",
+            "/api/config",
+            "/api/diagnostics",
+            "/api/environment/detect",
+            "/api/consolidation/config",
+        ]
+        for endpoint in endpoints:
+            with self.subTest(endpoint=endpoint):
+                resp = self.client.get(endpoint)
+                self.assertEqual(resp.status_code, 200, f"Endpoint {endpoint} failed")
+                # Verify valid JSON response
+                data = resp.json()
+                self.assertIsInstance(data, (dict, list))
+
+    def test_smoke_status_structure_is_correct(self):
+        """Smoke test: verify /api/status returns correct structure."""
+        resp = self.client.get("/api/status")
+        self.assertEqual(resp.status_code, 200)
+        status = resp.json()
+
+        # Verify model A status structure
+        self.assertIn("a", status)
+        self.assertIn("running", status["a"])
+        self.assertIn("healthy", status["a"])
+        self.assertIn("provider", status["a"])
+        self.assertIn("port", status["a"])
+
+        # Verify model B status structure
+        self.assertIn("b", status)
+        self.assertIn("running", status["b"])
+        self.assertIn("healthy", status["b"])
+
+    def test_smoke_config_endpoint_reflects_defaults(self):
+        """Smoke test: /api/config returns default configuration."""
+        resp = self.client.get("/api/config")
+        self.assertEqual(resp.status_code, 200)
+        config = resp.json()
+
+        # Verify essential config keys exist
+        self.assertIn("model_a_provider", config)
+        self.assertIn("model_a_port", config)
+        self.assertIn("model_b_port", config)
+        self.assertIn("use_patcher", config)
+
+    def test_smoke_diagnostics_omits_secrets(self):
+        """Smoke test: /api/diagnostics doesn't expose sensitive data."""
+        resp = self.client.get("/api/diagnostics")
+        self.assertEqual(resp.status_code, 200)
+        response_text = resp.text
+
+        # Verify no API keys in response
+        self.assertNotIn("sk-", response_text.lower())
+        self.assertNotIn("api_key", response_text.lower())
+
+    def test_smoke_environment_detect_includes_tools(self):
+        """Smoke test: /api/environment/detect returns tool info."""
+        resp = self.client.get("/api/environment/detect")
+        self.assertEqual(resp.status_code, 200)
+        env = resp.json()
+
+        # Verify expected fields
+        self.assertIn("shell", env)
+        self.assertIn("os", env)
+        self.assertIn("tools", env)
+        self.assertIsInstance(env["tools"], dict)
+
+    def test_smoke_start_request_validation_rejects_invalid_input(self):
+        """Smoke test: /api/start validates input and rejects malformed requests."""
+        # Send invalid request (missing required model_a)
+        resp = self.client.post(
+            "/api/start",
+            json={}
+        )
+        # Should get 422 (validation error) not 500 (crash)
+        self.assertEqual(resp.status_code, 422)
+
+    def test_smoke_start_request_rejects_missing_model_path(self):
+        """Smoke test: /api/start rejects local models without valid path."""
+        resp = self.client.post(
+            "/api/start",
+            json={
+                "model_a": {
+                    "provider": "local",
+                    "path": "/nonexistent/model.gguf",
+                    "port": 8080,
+                },
+                "host": "0.0.0.0"
+            }
+        )
+        # Should get 400 (bad request) not 500 (crash)
+        self.assertEqual(resp.status_code, 400)
 
 
 if __name__ == "__main__":

@@ -27,3 +27,9 @@ desktop.ini
 # Internal project docs (not for public repo)
 .replay/internal/
 internal-doc/
+
+# Local runtime logs
+.replay/logs/
+
+# Claude Code local settings (permissions, etc.)
+.claude/

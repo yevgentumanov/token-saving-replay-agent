@@ -5,7 +5,7 @@ declare const marked: { parse(md: string): string };
 declare const DOMPurify: { sanitize(html: string): string };
 
 // ===== Types =====
-interface ModelStatus { running: boolean; healthy: boolean; vram_error: boolean; pid: number | null; port: number; provider: string; }
+interface ModelStatus { running: boolean; healthy: boolean; vram_error: boolean; pid: number | null; port: number; provider: string; last_error: string; }
 interface StatusResponse { a: ModelStatus; b: ModelStatus; }
 
 interface EnvProfile {
@@ -48,6 +48,15 @@ interface ConsolidationResponse {
   mode?: "full" | "lightweight";  // added in Phase 2.5 full impl
 }
 
+// One persisted chat session (sidebar entry)
+interface ChatSession {
+  id: string;
+  title: string;
+  createdAt: number;
+  updatedAt: number;
+  messages: ChatMessage[];
+}
+
 // One versioned entry in the consolidation history
 interface ConsolidationEntry {
   version: number;
@@ -67,10 +76,8 @@ const IS_VSCODE = new URLSearchParams(location.search).get("vscode") === "1";
 // ============ LAUNCHER TAB ==============================================
 // ========================================================================
 const pathA      = $<HTMLInputElement>("pathA");
-const argsA      = $<HTMLInputElement>("argsA");
 const portA      = $<HTMLInputElement>("portA");
 const pathB      = $<HTMLInputElement>("pathB");
-const argsB      = $<HTMLInputElement>("argsB");
 const portB      = $<HTMLInputElement>("portB");
 const llamaPath  = $<HTMLInputElement>("llamaPath");
 const hostInput  = $<HTMLInputElement>("host");
@@ -132,10 +139,28 @@ const CLOUD_MODELS: Record<string, {value: string; label: string}[]> = {
 };
 
 const LAUNCHER_KEYS = [
-  "pathA","argsA","portA","pathB","argsB","portB","llamaPath","host","usePatcher",
+  "pathA","portA","computeA","ctxA","threadsA","flashAttnA","noMmapA",
+  "pathB","portB","computeB","ctxB","threadsB","flashAttnB","noMmapB",
+  "llamaPath","host","usePatcher",
   "providerA","cloudModelSelectA","customModelA","apiKeyA",
   "providerB","cloudModelSelectB","customModelB","apiKeyB",
 ] as const;
+
+function buildArgs(which: "a" | "b"): string {
+  const compute   = $<HTMLSelectElement>(`compute${which.toUpperCase()}`).value;
+  const ctx       = $<HTMLSelectElement>(`ctx${which.toUpperCase()}`).value;
+  const threads   = $<HTMLInputElement>(`threads${which.toUpperCase()}`).value;
+  const flashAttn = ($<HTMLInputElement>(`flashAttn${which.toUpperCase()}`)).checked;
+  const noMmap    = ($<HTMLInputElement>(`noMmap${which.toUpperCase()}`)).checked;
+  const parts: string[] = [
+    `-c ${ctx}`,
+    `-ngl ${compute === "gpu" ? "99" : "0"}`,
+    `-t ${threads || "4"}`,
+  ];
+  if (flashAttn) parts.push("--flash-attn on");
+  if (noMmap)    parts.push("--no-mmap");
+  return parts.join(" ");
+}
 
 function saveLauncherSettings(): void {
   LAUNCHER_KEYS.forEach(k => {
@@ -153,15 +178,17 @@ function loadLauncherSettings(): void {
 async function loadConfigFallback(): Promise<void> {
   if (pathA.value) return;
   try {
+    clientLog("info", "launcher.config.load.start");
     const r = await fetch("/api/config"); if (!r.ok) return;
     const c = await r.json();
     if (c.model_a_path)      pathA.value     = c.model_a_path;
-    if (c.model_a_args)      argsA.value     = c.model_a_args;
     if (c.model_a_port)      portA.value     = String(c.model_a_port);
     if (c.model_b_path)      pathB.value     = c.model_b_path;
-    if (c.model_b_args)      argsB.value     = c.model_b_args;
     if (c.model_b_port)      portB.value     = String(c.model_b_port);
-    if (c.llama_server_path) llamaPath.value = c.llama_server_path;
+    if (c.llama_server_path) {
+      llamaPath.value = c.llama_server_path;
+      localStorage.setItem("llamaPath", c.llama_server_path);
+    }
     if (c.host)              hostInput.value = c.host;
     if (c.use_patcher !== undefined) usePatcher.checked = c.use_patcher;
     if (c.model_a_provider)    providerA.value          = c.model_a_provider;
@@ -172,7 +199,10 @@ async function loadConfigFallback(): Promise<void> {
     if (c.model_b_cloud_model) customModelB.value       = c.model_b_cloud_model;
     handleProviderChange("A");
     handleProviderChange("B");
-  } catch (_) {}
+    clientLog("info", "launcher.config.load.done", "", { has_model_a: Boolean(c.model_a_path), has_model_b: Boolean(c.model_b_path) });
+  } catch (e) {
+    clientLog("warn", "launcher.config.load.failed", stringifyLogArg(e));
+  }
 }
 
 function addLog(text: string, cls = ""): void {
@@ -185,16 +215,93 @@ function addLog(text: string, cls = ""): void {
   consoleDiv.scrollTop = consoleDiv.scrollHeight;
 }
 
+type ClientLogLevel = "debug" | "info" | "warn" | "error" | "fatal";
+
+const originalConsole = {
+  debug: console.debug.bind(console),
+  log: console.log.bind(console),
+  warn: console.warn.bind(console),
+  error: console.error.bind(console),
+};
+
+function stringifyLogArg(value: unknown): string {
+  if (value instanceof Error) return `${value.name}: ${value.message}\n${value.stack || ""}`.trim();
+  if (typeof value === "string") return value;
+  try { return JSON.stringify(value); }
+  catch { return String(value); }
+}
+
+function clientLog(level: ClientLogLevel, event: string, message = "", data: Record<string, unknown> = {}): void {
+  const payload = {
+    level,
+    event,
+    message: message.slice(0, 4000),
+    data,
+    ts: Date.now() / 1000,
+    url: location.href,
+  };
+  try {
+    fetch("/api/log/frontend", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      keepalive: true,
+    }).catch(() => {});
+  } catch (_) {}
+}
+
+console.debug = (...args: unknown[]) => {
+  originalConsole.debug(...args);
+  clientLog("debug", "console.debug", args.map(stringifyLogArg).join(" "));
+};
+console.log = (...args: unknown[]) => {
+  originalConsole.log(...args);
+  clientLog("info", "console.log", args.map(stringifyLogArg).join(" "));
+};
+console.warn = (...args: unknown[]) => {
+  originalConsole.warn(...args);
+  clientLog("warn", "console.warn", args.map(stringifyLogArg).join(" "));
+};
+console.error = (...args: unknown[]) => {
+  originalConsole.error(...args);
+  clientLog("error", "console.error", args.map(stringifyLogArg).join(" "));
+};
+
+window.addEventListener("error", (event) => {
+  clientLog("fatal", "window.error", event.message, {
+    filename: event.filename,
+    lineno: event.lineno,
+    colno: event.colno,
+    error: event.error ? stringifyLogArg(event.error) : "",
+  });
+});
+
+window.addEventListener("unhandledrejection", (event) => {
+  clientLog("fatal", "window.unhandledrejection", stringifyLogArg(event.reason));
+});
+
+clientLog("info", "frontend.loaded", "Browser app script loaded", {
+  is_vscode: IS_VSCODE,
+  user_agent: navigator.userAgent,
+});
+
 let lastStatus: StatusResponse | null = null;
 
 function applyStatus(s: ModelStatus, dot: HTMLSpanElement, label: HTMLDivElement, chatBtn: HTMLButtonElement): void {
-  dot.className = "dot " + (!s.running ? "dot-gray" : s.vram_error ? "dot-red" : s.healthy ? "dot-green" : "dot-yellow");
-  label.textContent = !s.running
-    ? "Stopped"
-    : s.vram_error ? "VRAM Error"
-    : s.healthy
-      ? (s.provider === "local" ? `Running (pid ${s.pid})` : `Ready (${s.provider})`)
-      : "Starting...";
+  dot.className = "dot " + (!s.running ? (s.last_error ? "dot-red" : "dot-gray") : s.vram_error ? "dot-red" : s.healthy ? "dot-green" : "dot-yellow");
+  if (!s.running) {
+    label.textContent = s.last_error ? `Error: ${s.last_error}` : "Stopped";
+    label.title = s.last_error || "";
+  } else if (s.vram_error) {
+    label.textContent = "VRAM Error";
+    label.title = "";
+  } else if (s.healthy) {
+    label.textContent = s.provider === "local" ? `Running (pid ${s.pid})` : `Ready (${s.provider})`;
+    label.title = "";
+  } else {
+    label.textContent = "Starting...";
+    label.title = "";
+  }
   chatBtn.style.display = (s.running && s.healthy && s.provider === "local") ? "block" : "none";
 }
 
@@ -202,6 +309,20 @@ async function pollStatus(): Promise<void> {
   try {
     const r = await fetch("/api/status"); if (!r.ok) return;
     const s: StatusResponse = await r.json();
+    if (
+      !lastStatus ||
+      lastStatus.a.running !== s.a.running ||
+      lastStatus.a.healthy !== s.a.healthy ||
+      lastStatus.b.running !== s.b.running ||
+      lastStatus.b.healthy !== s.b.healthy ||
+      lastStatus.a.vram_error !== s.a.vram_error ||
+      lastStatus.b.vram_error !== s.b.vram_error
+    ) {
+      clientLog("info", "status.changed", "", {
+        a: { running: s.a.running, healthy: s.a.healthy, provider: s.a.provider, vram_error: s.a.vram_error },
+        b: { running: s.b.running, healthy: s.b.healthy, provider: s.b.provider, vram_error: s.b.vram_error },
+      });
+    }
     lastStatus = s;
 
     const anyRunning = s.a.running || s.b.running;
@@ -214,7 +335,9 @@ async function pollStatus(): Promise<void> {
       if (!s.b.running && s.a.running) statusB.textContent = "Not started";
     }
     updateChatTabDot(s);
-  } catch (_) {}
+  } catch (e) {
+    clientLog("warn", "status.poll.failed", stringifyLogArg(e));
+  }
 }
 
 function syncPatcherBlock(): void {
@@ -227,21 +350,31 @@ function syncPatcherBlock(): void {
   if (consolidationRow)   consolidationRow.style.display   = show;
   if (consolidationCtrls) consolidationCtrls.style.display = show;
 }
-usePatcher.addEventListener("change", () => { syncPatcherBlock(); saveLauncherSettings(); });
+usePatcher.addEventListener("change", () => {
+  clientLog("info", "launcher.use_patcher.changed", "", { checked: usePatcher.checked });
+  syncPatcherBlock();
+  saveLauncherSettings();
+});
 
 async function browseFile(type: string, target: HTMLInputElement, logMsg: string): Promise<void> {
   try {
+    clientLog("info", "launcher.file_dialog.start", "", { type });
     const r = await fetch(`/api/open-file-dialog?type=${type}`);
     const data = await r.json();
     if (data.path) { target.value = data.path; saveLauncherSettings(); addLog(logMsg + data.path, "log-info"); }
-  } catch (e) { addLog("File dialog failed: " + e, "log-error"); }
+    clientLog("info", "launcher.file_dialog.done", "", { type, selected: Boolean(data.path) });
+  } catch (e) {
+    clientLog("error", "launcher.file_dialog.failed", stringifyLogArg(e), { type });
+    addLog("File dialog failed: " + e, "log-error");
+  }
 }
 $("browseA").addEventListener("click",   () => browseFile("model",  pathA,    "Model A: "));
 $("browseB").addEventListener("click",   () => browseFile("model",  pathB,    "Model B: "));
-$("browseBin").addEventListener("click", () => browseFile("binary", llamaPath,"llama-server: "));
+$("browseBin").addEventListener("click", () => browseFile("binary", llamaPath,"llama-server override: "));
 
 async function loadDiagnostics(copy = false): Promise<void> {
   try {
+    clientLog("info", "diagnostics.load.start", "", { copy });
     const r = await fetch("/api/diagnostics");
     const data = await r.json();
     if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
@@ -255,11 +388,13 @@ async function loadDiagnostics(copy = false): Promise<void> {
     } else {
       addLog("Diagnostics loaded", "log-info");
     }
+    clientLog("info", "diagnostics.load.done", "", { copy });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     diagnosticsPanel.textContent = `Diagnostics failed: ${msg}`;
     diagnosticsPanel.classList.add("show");
     addLog("Diagnostics failed: " + msg, "log-error");
+    clientLog("error", "diagnostics.load.failed", msg, { copy });
   }
 }
 
@@ -301,6 +436,7 @@ function handleProviderChange(which: "A" | "B"): void {
     populateCloudModels(modelSel, provider.value);
     customField.style.display = modelSel.value === "__custom__" ? "" : "none";
   }
+  clientLog("info", "launcher.provider.changed", "", { which, provider: provider.value });
   saveLauncherSettings();
 }
 
@@ -316,6 +452,11 @@ cloudModelSelectB.addEventListener("change", () => {
 });
 
 startBtn.addEventListener("click", async () => {
+  clientLog("info", "launcher.start.clicked", "", {
+    provider_a: providerA.value,
+    provider_b: providerB.value,
+    use_patcher: usePatcher.checked,
+  });
   const isLocalA = providerA.value === "local";
   if (isLocalA && !pathA.value.trim()) { addLog("Select Model A path first", "log-error"); return; }
   if (!isLocalA && !apiKeyA.value.trim()) { addLog("Enter API key for Model A", "log-error"); return; }
@@ -328,7 +469,7 @@ startBtn.addEventListener("click", async () => {
 
   const body: Record<string, unknown> = {
     model_a: {
-      path: pathA.value.trim(), args: argsA.value.trim(), port: Number(portA.value),
+      path: pathA.value.trim(), args: buildArgs("a"), port: Number(portA.value),
       provider: providerA.value, api_key: apiKeyA.value.trim(), cloud_model: cloudModelA,
     },
     host: hostInput.value.trim(),
@@ -336,7 +477,7 @@ startBtn.addEventListener("click", async () => {
   };
   if (usePatcher.checked && (pathB.value.trim() || providerB.value !== "local")) {
     body.model_b = {
-      path: pathB.value.trim(), args: argsB.value.trim(), port: Number(portB.value),
+      path: pathB.value.trim(), args: buildArgs("b"), port: Number(portB.value),
       provider: providerB.value, api_key: apiKeyB.value.trim(), cloud_model: cloudModelB,
     };
   }
@@ -346,32 +487,52 @@ startBtn.addEventListener("click", async () => {
       body: JSON.stringify(body),
     });
     const data = await r.json();
-    if (!r.ok) { addLog("Error: " + (data.detail || "unknown"), "log-error"); startBtn.disabled = false; }
+    if (!r.ok) {
+      clientLog("error", "launcher.start.failed", data.detail || "unknown", { status: r.status });
+      addLog("Error: " + (data.detail || "unknown"), "log-error"); startBtn.disabled = false;
+    }
     else {
       if (data.pid_a) addLog(`Model A started (pid ${data.pid_a})`, "log-a");
       else addLog("Model A connected (cloud)", "log-a");
       if (data.pid_b) addLog(`Model B started (pid ${data.pid_b})`, "log-b");
+      clientLog("info", "launcher.start.done", "", { pid_a: data.pid_a || null, pid_b: data.pid_b || null });
       connectWs();
     }
-  } catch (e) { addLog("Request failed: " + e, "log-error"); startBtn.disabled = false; }
+  } catch (e) {
+    clientLog("error", "launcher.start.request_failed", stringifyLogArg(e));
+    addLog("Request failed: " + e, "log-error"); startBtn.disabled = false;
+  }
 });
 
 stopBtn.addEventListener("click", async () => {
+  clientLog("info", "launcher.stop.clicked");
   addLog("Stopping all...", "log-info");
-  try { await fetch("/api/stop", { method: "POST" }); addLog("Stopped", "log-info"); ws?.close(); ws = null; }
-  catch (e) { addLog("Stop failed: " + e, "log-error"); }
+  try {
+    await fetch("/api/stop", { method: "POST" });
+    clientLog("info", "launcher.stop.done");
+    addLog("Stopped", "log-info"); ws?.close(); ws = null;
+  }
+  catch (e) {
+    clientLog("error", "launcher.stop.failed", stringifyLogArg(e));
+    addLog("Stop failed: " + e, "log-error");
+  }
 });
 
 let ws: WebSocket | null = null;
 function connectWs(): void {
   if (ws) return;
+  clientLog("info", "logs.websocket.connecting");
   ws = new WebSocket(`ws://${location.host}/ws/logs`);
   ws.onmessage = (e) => {
     if (e.data === "\x00") return;
     const cls = e.data.startsWith("[A]") ? "log-a" : e.data.startsWith("[B]") ? "log-b" : "";
     addLog(e.data, cls);
   };
-  ws.onclose = () => { ws = null; setTimeout(connectWs, 3000); };
+  ws.onerror = () => clientLog("warn", "logs.websocket.error");
+  ws.onclose = () => {
+    clientLog("warn", "logs.websocket.closed");
+    ws = null; setTimeout(connectWs, 3000);
+  };
 }
 
 // ========================================================================
@@ -380,6 +541,7 @@ function connectWs(): void {
 document.querySelectorAll<HTMLButtonElement>(".tab-btn").forEach(btn => {
   btn.addEventListener("click", () => {
     const tab = btn.dataset.tab!;
+    clientLog("info", "ui.tab.changed", "", { tab });
     document.querySelectorAll(".tab-btn").forEach(b => b.classList.toggle("active", b === btn));
     document.querySelectorAll(".tab-panel").forEach(p => p.classList.toggle("active", p.id === `panel-${tab}`));
     if (tab === "chat") checkChatReadiness();
@@ -454,6 +616,13 @@ function saveProfile(): void {
     detected_summary:  extractDetectedSummary(rawRules),
   };
   localStorage.setItem(PROFILE_KEY, JSON.stringify(p));
+  clientLog("info", "profile.saved", "", {
+    shell: p.shell,
+    os: p.os,
+    package_manager: p.package_manager,
+    has_custom_rules: Boolean(p.custom_rules.trim()),
+    has_detected_summary: Boolean(p.detected_summary),
+  });
   const saved = $<HTMLSpanElement>("profileSaved");
   saved.classList.add("show");
   setTimeout(() => saved.classList.remove("show"), 1500);
@@ -516,6 +685,7 @@ async function detectProfileEnvironment(): Promise<void> {
   profileDetectBtn.textContent = "Detecting...";
   profileDetectPanel.classList.add("show");
   profileDetectPanel.textContent = "Detecting environment...";
+  clientLog("info", "profile.detect.start");
   try {
     const r = await fetch("/api/environment/detect");
     const data: EnvironmentDetection = await r.json();
@@ -525,12 +695,18 @@ async function detectProfileEnvironment(): Promise<void> {
     profileApplyDetectBtn.style.display = "";
     profileCopyDetectBtn.style.display = "";
     addLog("Environment detection loaded", "log-info");
+    clientLog("info", "profile.detect.done", "", {
+      os: data.os.name,
+      shell: data.shell.guess,
+      tools: Object.fromEntries(Object.entries(data.tools).map(([key, value]) => [key, value.found])),
+    });
   } catch (e) {
     latestEnvironmentDetection = null;
     const msg = e instanceof Error ? e.message : String(e);
     profileDetectPanel.textContent = `Environment detection failed: ${msg}`;
     profileApplyDetectBtn.style.display = "none";
     addLog("Environment detection failed: " + msg, "log-error");
+    clientLog("error", "profile.detect.failed", msg);
   } finally {
     profileDetectBtn.disabled = false;
     profileDetectBtn.textContent = originalText;
@@ -538,7 +714,10 @@ async function detectProfileEnvironment(): Promise<void> {
 }
 
 function applyDetectedProfile(): void {
-  if (!latestEnvironmentDetection) return;
+  if (!latestEnvironmentDetection) {
+    clientLog("warn", "profile.apply_detected.no_detection");
+    return;
+  }
   const detected = latestEnvironmentDetection;
   const shellSelect = $<HTMLSelectElement>("prof-shell");
   const osSelect = $<HTMLSelectElement>("prof-os");
@@ -559,16 +738,26 @@ function applyDetectedProfile(): void {
   rulesEl.value = mergeDetectedToolsBlock(rulesEl.value, summary);
   saveProfile();
   addLog("Detected environment applied to Profile", "log-info");
+  clientLog("info", "profile.apply_detected.done", "", {
+    os: detected.os.name,
+    shell: detected.shell.guess,
+    package_manager: pkg,
+  });
 }
 
 async function copyDetectedEnvironment(): Promise<void> {
-  if (!profileDetectPanel.textContent) return;
+  if (!profileDetectPanel.textContent) {
+    clientLog("warn", "profile.copy_detected.empty");
+    return;
+  }
   try {
     await navigator.clipboard.writeText(profileDetectPanel.textContent);
     addLog("Environment detection copied to clipboard", "log-info");
+    clientLog("info", "profile.copy_detected.done");
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     addLog("Copy environment detection failed: " + msg, "log-error");
+    clientLog("error", "profile.copy_detected.failed", msg);
   }
 }
 
@@ -612,11 +801,117 @@ const chatClear                  = $<HTMLButtonElement>("chatClear");
 const chatBanner                 = $<HTMLDivElement>("chatBanner");
 const consolidationEnabledToggle = $<HTMLInputElement>("consolidationEnabled");  // Phase 2.5
 
-const HISTORY_KEY = "chatHistory";
-let chatHistoryArr: ChatMessage[] = [];
+const CHATS_KEY        = "chats_v1";
+const ACTIVE_CHAT_KEY  = "activeChatId";
+const LEGACY_HISTORY_KEY = "chatHistory";  // pre-multi-chat sessionStorage key
+
+let chats: ChatSession[]   = [];
+let activeChatId: string   = "";
+let chatHistoryArr: ChatMessage[] = [];  // live ref to active chat's messages
 let streaming    = false;
 let blockCounter = 0;
 let stepCounter  = 0;
+
+const newChatBtn = $<HTMLButtonElement>("newChatBtn");
+const chatListEl = $<HTMLDivElement>("chatList");
+
+function genChatId(): string {
+  return "c_" + Date.now().toString(36) + Math.random().toString(36).slice(2, 6);
+}
+function activeChat(): ChatSession | null {
+  return chats.find(c => c.id === activeChatId) ?? null;
+}
+function persistChats(): void {
+  localStorage.setItem(CHATS_KEY, JSON.stringify(chats));
+  localStorage.setItem(ACTIVE_CHAT_KEY, activeChatId);
+}
+function deriveTitle(messages: ChatMessage[]): string {
+  const firstUser = messages.find(m => m.role === "user");
+  if (!firstUser) return "New chat";
+  const t = firstUser.content.trim().replace(/\s+/g, " ");
+  return t.length > 40 ? t.slice(0, 40) + "…" : (t || "New chat");
+}
+function renderChatList(): void {
+  chatListEl.innerHTML = "";
+  // Show most recently updated first
+  const sorted = chats.slice().sort((a, b) => b.updatedAt - a.updatedAt);
+  for (const c of sorted) {
+    const item = document.createElement("div");
+    item.className = "chat-item" + (c.id === activeChatId ? " active" : "");
+    item.dataset.chatId = c.id;
+    const title = document.createElement("span");
+    title.className = "chat-item-title";
+    title.textContent = c.title || "New chat";
+    const del = document.createElement("button");
+    del.className = "chat-item-del";
+    del.title = "Delete chat";
+    del.textContent = "×";
+    del.addEventListener("click", (e) => { e.stopPropagation(); deleteChat(c.id); });
+    item.appendChild(title);
+    item.appendChild(del);
+    item.addEventListener("click", () => switchChat(c.id));
+    chatListEl.appendChild(item);
+  }
+}
+function refreshActiveChat(): void {
+  const c = activeChat();
+  chatHistoryArr = c ? c.messages : [];
+  blockCounter = 0; stepCounter = 0;
+  currentTurnPatches = []; lastConsolidationSummary = null;
+  consolidationHistory = []; consolidationVersionCounter = 0;
+  chatMessages.innerHTML = "";
+  chatHistoryArr.forEach(renderMessage);
+  syncUndoBtn();
+}
+function createNewChat(activate: boolean = true): ChatSession {
+  const c: ChatSession = {
+    id: genChatId(),
+    title: "New chat",
+    createdAt: Date.now(),
+    updatedAt: Date.now(),
+    messages: [],
+  };
+  chats.push(c);
+  if (activate) activeChatId = c.id;
+  persistChats();
+  renderChatList();
+  if (activate) refreshActiveChat();
+  clientLog("info", "chat.session.created", "", { id: c.id });
+  return c;
+}
+function switchChat(id: string): void {
+  if (streaming) return;
+  if (id === activeChatId) return;
+  const c = chats.find(x => x.id === id);
+  if (!c) return;
+  activeChatId = id;
+  persistChats();
+  renderChatList();
+  refreshActiveChat();
+  clientLog("info", "chat.session.switched", "", { id });
+}
+function deleteChat(id: string): void {
+  if (streaming) return;
+  if (!confirm("Delete this chat?")) return;
+  const idx = chats.findIndex(c => c.id === id);
+  if (idx === -1) return;
+  chats.splice(idx, 1);
+  if (activeChatId === id) {
+    if (chats.length === 0) {
+      createNewChat(true);
+      return;
+    }
+    const next = chats.slice().sort((a, b) => b.updatedAt - a.updatedAt)[0];
+    activeChatId = next.id;
+    persistChats();
+    renderChatList();
+    refreshActiveChat();
+  } else {
+    persistChats();
+    renderChatList();
+  }
+  clientLog("info", "chat.session.deleted", "", { id });
+}
 
 // ===== Phase 2.5 - Consolidation Pass state =====
 let currentTurnPatches: PatchEntry[] = [];
@@ -633,13 +928,58 @@ let consolidationTokenThreshold = 12000;
 
 function loadHistory(): void {
   try {
-    const raw = sessionStorage.getItem(HISTORY_KEY);
-    chatHistoryArr = raw ? JSON.parse(raw) : [];
-  } catch { chatHistoryArr = []; }
-  chatMessages.innerHTML = "";
-  chatHistoryArr.forEach(renderMessage);
+    const raw = localStorage.getItem(CHATS_KEY);
+    chats = raw ? JSON.parse(raw) : [];
+  } catch (e) {
+    chats = [];
+    clientLog("warn", "chat.sessions.load_failed", stringifyLogArg(e));
+  }
+
+  // One-time migration from the old single-chat sessionStorage entry.
+  if (chats.length === 0) {
+    try {
+      const legacy = sessionStorage.getItem(LEGACY_HISTORY_KEY);
+      if (legacy) {
+        const msgs: ChatMessage[] = JSON.parse(legacy);
+        if (Array.isArray(msgs) && msgs.length > 0) {
+          chats.push({
+            id: genChatId(),
+            title: deriveTitle(msgs),
+            createdAt: Date.now(),
+            updatedAt: Date.now(),
+            messages: msgs,
+          });
+          sessionStorage.removeItem(LEGACY_HISTORY_KEY);
+          clientLog("info", "chat.sessions.migrated", "", { messages: msgs.length });
+        }
+      }
+    } catch (e) {
+      clientLog("warn", "chat.sessions.migration_failed", stringifyLogArg(e));
+    }
+  }
+
+  activeChatId = localStorage.getItem(ACTIVE_CHAT_KEY) || "";
+  if (!chats.find(c => c.id === activeChatId)) {
+    activeChatId = chats.length > 0 ? chats[chats.length - 1].id : "";
+  }
+  if (chats.length === 0) {
+    createNewChat(true);
+  } else {
+    persistChats();
+    renderChatList();
+    refreshActiveChat();
+  }
+  clientLog("info", "chat.sessions.loaded", "", { count: chats.length, active: activeChatId });
 }
-function persistHistory(): void { sessionStorage.setItem(HISTORY_KEY, JSON.stringify(chatHistoryArr)); }
+function persistHistory(): void {
+  const c = activeChat();
+  if (!c) return;
+  c.updatedAt = Date.now();
+  if (c.title === "New chat" || !c.title) c.title = deriveTitle(c.messages);
+  persistChats();
+  renderChatList();
+  clientLog("debug", "chat.history.persisted", "", { id: c.id, messages: c.messages.length });
+}
 
 function checkChatReadiness(): void {
   if (!lastStatus || !lastStatus.a.running || !lastStatus.a.healthy) {
@@ -657,6 +997,7 @@ function checkChatReadiness(): void {
 }
 
 function renderMessage(msg: ChatMessage): HTMLDivElement {
+  clientLog("debug", "chat.message.render", "", { role: msg.role, chars: msg.content.length });
   const wrap = document.createElement("div");
   wrap.className = "msg " + (msg.role === "user" ? "msg-user" : "msg-asst");
   const role = document.createElement("div");
@@ -679,9 +1020,30 @@ function renderMessage(msg: ChatMessage): HTMLDivElement {
 // ===== Step Extractor + code block wrapping =====
 const COMMAND_LANGS = new Set(["bash","sh","cmd","powershell","ps1","pwsh","batch","bat","zsh","fish","shell","console"]);
 
+const LATEX_SYMBOLS: Record<string, string> = {
+  rightarrow: "→", to: "→", longrightarrow: "⟶",
+  leftarrow:  "←", gets: "←", longleftarrow: "⟵",
+  Rightarrow: "⇒", implies: "⇒",
+  Leftarrow:  "⇐", impliedby: "⇐",
+  leftrightarrow: "↔", Leftrightarrow: "⇔", iff: "⇔",
+  uparrow: "↑", downarrow: "↓", updownarrow: "↕",
+  times: "×", cdot: "·", div: "÷", pm: "±", mp: "∓",
+  approx: "≈", neq: "≠", ne: "≠",
+  leq: "≤", le: "≤", geq: "≥", ge: "≥",
+  infty: "∞", sum: "∑", prod: "∏", int: "∫",
+  alpha: "α", beta: "β", gamma: "γ", delta: "δ",
+  epsilon: "ε", theta: "θ", lambda: "λ", mu: "μ",
+  pi: "π", sigma: "σ", phi: "φ", omega: "ω",
+  Delta: "Δ", Sigma: "Σ", Omega: "Ω",
+};
+function decodeLatexInline(md: string): string {
+  return md.replace(/\$\\([a-zA-Z]+)\$/g, (m, name) => LATEX_SYMBOLS[name] ?? m);
+}
+
 // Returns inline-patch Promises so sendMessage() can await them before running Consolidation Pass.
 function renderAssistantContent(container: HTMLElement, markdown: string): Promise<void>[] {
-  const html = DOMPurify.sanitize(marked.parse(markdown));
+  clientLog("info", "chat.assistant.render.start", "", { chars: markdown.length });
+  const html = DOMPurify.sanitize(marked.parse(decodeLatexInline(markdown)));
   const tmp = document.createElement("div");
   tmp.innerHTML = html;
 
@@ -745,6 +1107,7 @@ function renderAssistantContent(container: HTMLElement, markdown: string): Promi
   } else {
     console.log("[step-extractor] patcher skipped - B not healthy or disabled");
   }
+  clientLog("info", "chat.assistant.render.done", "", { patcher_ready: Boolean(patcherReady), patch_promises: patchPromises.length });
   return patchPromises;
 }
 
@@ -780,6 +1143,11 @@ async function runInlinePatch(wrap: HTMLDivElement, profile: EnvProfile): Promis
   ].join("\n");
 
   console.log(`[patcher] inline: blockId=${wrap.dataset.blockId} lang=${lang}`);
+  clientLog("info", "patcher.inline.start", "", {
+    block_id: wrap.dataset.blockId || "",
+    lang,
+    original_chars: original.length,
+  });
   try {
     const r = await fetch("/api/chat/patcher", {
       method: "POST", headers: { "Content-Type": "application/json" },
@@ -793,18 +1161,29 @@ async function runInlinePatch(wrap: HTMLDivElement, profile: EnvProfile): Promis
     });
     const data = await r.json();
     console.log(`[patcher] inline response (status ${r.status}) finish_reason=${data?.choices?.[0]?.finish_reason}:`, data?.choices?.[0]?.message);
-    if (!r.ok) { console.warn("[patcher] inline: HTTP error", r.status, data); return; }
+    if (!r.ok) {
+      console.warn("[patcher] inline: HTTP error", r.status, data);
+      clientLog("warn", "patcher.inline.http_error", data?.detail || "", { status: r.status, block_id: wrap.dataset.blockId || "" });
+      return;
+    }
     const reply: string = extractPatcherReply(data);
     console.log(`[patcher] inline reply: "${reply}"`);
     if (!reply || reply === "UNCHANGED" || reply === original.trim()) {
       console.log("[patcher] inline: no change needed");
+      clientLog("info", "patcher.inline.unchanged", "", { block_id: wrap.dataset.blockId || "" });
       return;
     }
     const cleaned = reply.replace(/^```\w*\n?/, "").replace(/\n?```$/, "").trim();
-    if (cleaned.length < 3) { console.warn("[patcher] inline: reply too short, skipping"); return; }
+    if (cleaned.length < 3) {
+      console.warn("[patcher] inline: reply too short, skipping");
+      clientLog("warn", "patcher.inline.reply_too_short", "", { block_id: wrap.dataset.blockId || "", reply_chars: cleaned.length });
+      return;
+    }
     applyPatch(wrap, cleaned, `auto-translated to ${profile.shell}`, "inline");
+    clientLog("info", "patcher.inline.patched", "", { block_id: wrap.dataset.blockId || "", patched_chars: cleaned.length });
   } catch (e) {
     console.error("[patcher] inline error:", e);
+    clientLog("error", "patcher.inline.failed", stringifyLogArg(e), { block_id: wrap.dataset.blockId || "" });
   }
 }
 
@@ -822,6 +1201,13 @@ function applyPatch(wrap: HTMLDivElement, newContent: string, badgeText: string,
     patched:  newContent,
     source,
   });
+  clientLog("info", "patch.apply", "", {
+    block_id: wrap.dataset.blockId || "",
+    lang: wrap.dataset.lang || "",
+    source,
+    original_chars: (wrap.dataset.original || "").length,
+    patched_chars: newContent.length,
+  });
 
   wrap.querySelector(".patch-badge")?.remove();
   const badge = document.createElement("div");
@@ -833,6 +1219,7 @@ function applyPatch(wrap: HTMLDivElement, newContent: string, badgeText: string,
     const idx = currentTurnPatches.findIndex(p => p.block_id === (wrap.dataset.blockId || ""));
     if (idx !== -1) currentTurnPatches.splice(idx, 1);
     badge.remove();
+    clientLog("info", "patch.undo", "", { block_id: wrap.dataset.blockId || "", source });
   });
 
   // Error Popup patches don't go through the inline patcher Promise chain, so trigger
@@ -853,6 +1240,7 @@ function scheduleConsolidationAfterErrorPopup(wrap: HTMLDivElement): void {
     const asstDiv = wrap.closest(".msg") as HTMLDivElement | null;
     if (!asstDiv || currentTurnPatches.length === 0) return;
     console.log(`[consolidation] error-popup trigger: ${currentTurnPatches.length} patch(es)`);
+    clientLog("info", "consolidation.error_popup_trigger", "", { patches: currentTurnPatches.length });
     runConsolidationPass(asstDiv, currentTurnPatches.slice());
   }, 400);
 }
@@ -918,6 +1306,7 @@ function rollbackConsolidation(n: number, triggeredBy: "user" | "model"): void {
   const logMsg = `Consolidation rollback: removed v${firstV}-${lastV} (triggered by ${triggeredBy})`;
   addLog(logMsg, "log-info");
   console.log(`[consolidation] ${logMsg}`);
+  clientLog("info", "consolidation.rollback", logMsg, { first_version: firstV, last_version: lastV, triggered_by: triggeredBy });
   syncUndoBtn();
 }
 
@@ -931,11 +1320,16 @@ function checkForRollbackCommand(text: string): number | null {
 
 async function runConsolidationPass(asstDiv: HTMLDivElement, patches: PatchEntry[]): Promise<void> {
   const patcherReady = lastStatus?.b.running && lastStatus.b.healthy && usePatcher.checked;
-  if (!patcherReady) { console.log("[consolidation] skipped - patcher not ready"); return; }
+  if (!patcherReady) {
+    console.log("[consolidation] skipped - patcher not ready");
+    clientLog("warn", "consolidation.skipped_not_ready");
+    return;
+  }
   if (!patches.length) return;
 
   const estTokens = estimateTokens(patches);
   console.log(`[consolidation] starting pass: ${patches.length} patch(es), ~${estTokens} tokens`);
+  clientLog("info", "consolidation.start", "", { patches: patches.length, estimated_tokens: estTokens });
 
   try {
     const r = await fetch("/api/consolidation", {
@@ -945,6 +1339,7 @@ async function runConsolidationPass(asstDiv: HTMLDivElement, patches: PatchEntry
     if (!r.ok) {
       const err = await r.json().catch(() => ({}));
       console.warn("[consolidation] server error:", r.status, (err as any).detail || err);
+      clientLog("error", "consolidation.server_error", (err as any).detail || "", { status: r.status });
       return;
     }
     const data: ConsolidationResponse = await r.json();
@@ -1001,9 +1396,16 @@ async function runConsolidationPass(asstDiv: HTMLDivElement, patches: PatchEntry
     const logMsg = `${modeLabel} v${consolidationVersionCounter}: ${patches.length} change(s) summarized`;
     console.log(`[consolidation] ${logMsg}`);
     addLog(logMsg, "log-info");
+    clientLog("info", "consolidation.done", logMsg, {
+      version: consolidationVersionCounter,
+      mode: data.mode,
+      patches: patches.length,
+      changed_steps: data.changed_steps.length,
+    });
 
   } catch (e) {
     console.error("[consolidation] error:", e);
+    clientLog("error", "consolidation.failed", stringifyLogArg(e));
   }
 }
 
@@ -1018,6 +1420,7 @@ const errPaste        = $<HTMLButtonElement>("errPaste");
 let errActiveWrap: HTMLDivElement | null = null;
 
 function openErrorModal(wrap: HTMLDivElement): void {
+  clientLog("info", "error_popup.open", "", { block_id: wrap.dataset.blockId || "", lang: wrap.dataset.lang || "" });
   errActiveWrap = wrap;
   errBlockEl.textContent = wrap.querySelector("code")?.textContent || "";
   errStderr.value = "";
@@ -1027,15 +1430,24 @@ function openErrorModal(wrap: HTMLDivElement): void {
   errModal.classList.add("show");
   setTimeout(() => errStderr.focus(), 50);
 }
-function closeErrorModal(): void { errModal.classList.remove("show"); errActiveWrap = null; }
+function closeErrorModal(): void {
+  clientLog("info", "error_popup.close");
+  errModal.classList.remove("show"); errActiveWrap = null;
+}
 
 errCancel.addEventListener("click", closeErrorModal);
 errModal.addEventListener("click", (e) => { if (e.target === errModal) closeErrorModal(); });
 document.addEventListener("keydown", (e) => { if (e.key === "Escape" && errModal.classList.contains("show")) closeErrorModal(); });
 
 errPaste.addEventListener("click", async () => {
-  try { errStderr.value = await navigator.clipboard.readText(); }
-  catch { alert("Clipboard access denied"); }
+  try {
+    errStderr.value = await navigator.clipboard.readText();
+    clientLog("info", "error_popup.paste.done", "", { chars: errStderr.value.length });
+  }
+  catch (e) {
+    clientLog("error", "error_popup.paste.failed", stringifyLogArg(e));
+    alert("Clipboard access denied");
+  }
 });
 
 errSubmit.addEventListener("click", async () => {
@@ -1062,6 +1474,11 @@ errSubmit.addEventListener("click", async () => {
   ].join("\n");
 
   console.log("[patcher] error-popup prompt:\n" + prompt);
+  clientLog("info", "error_popup.submit", "", {
+    block_id: errActiveWrap.dataset.blockId || "",
+    command_chars: code.length,
+    stderr_chars: errStderr.value.trim().length,
+  });
   errSubmit.disabled = true;
   errSubmit.textContent = "Thinking...";
   try {
@@ -1098,10 +1515,13 @@ errSubmit.addEventListener("click", async () => {
     // Pass "error_popup" source so consolidation record distinguishes manual fixes
     (box.querySelector(".err-btn-apply") as HTMLButtonElement).addEventListener("click", () => {
       if (errActiveWrap) applyPatch(errActiveWrap, fix, "patched from error", "error_popup");
+      clientLog("info", "error_popup.apply_fix", "", { fix_chars: fix.length });
       closeErrorModal();
     });
+    clientLog("info", "error_popup.response.done", "", { fix_chars: fix.length, why_chars: why.length });
   } catch (e: any) {
     errFixContainer.innerHTML = `<div style="color:#fca5a5;font-size:13px">Patcher failed: ${e.message || e}</div>`;
+    clientLog("error", "error_popup.response.failed", e.message || String(e));
   } finally {
     errSubmit.disabled = false;
     errSubmit.textContent = "Ask patcher";
@@ -1113,11 +1533,20 @@ async function sendMessage(): Promise<void> {
   const text = chatInput.value.trim();
   if (!text || streaming) return;
   if (!lastStatus?.a.running || !lastStatus.a.healthy) { checkChatReadiness(); return; }
+  clientLog("info", "chat.send.start", "", {
+    user_chars: text.length,
+    history_messages: chatHistoryArr.length,
+    consolidation_pending: Boolean(lastConsolidationSummary),
+    model_a_provider: lastStatus.a.provider,
+    patcher_ready: Boolean(lastStatus.b.running && lastStatus.b.healthy && usePatcher.checked),
+  });
 
   chatInput.value = "";
   const userMsg: ChatMessage = { role: "user", content: text };
   chatHistoryArr.push(userMsg);
   renderMessage(userMsg);
+  // Update sidebar title immediately so the new chat is identifiable while streaming.
+  persistHistory();
 
   const asstMsg: ChatMessage = { role: "assistant", content: "" };
   chatHistoryArr.push(asstMsg);
@@ -1137,6 +1566,7 @@ async function sendMessage(): Promise<void> {
     systemParts.push("\n\n" + lastConsolidationSummary);
     lastConsolidationSummary = null;
     console.log("[consolidation] injected summary into system prompt");
+    clientLog("info", "consolidation.injected_into_prompt");
   }
 
   const body = {
@@ -1155,6 +1585,7 @@ async function sendMessage(): Promise<void> {
     });
     if (!r.ok || !r.body) {
       const errText = await r.text();
+      clientLog("error", "chat.main.http_error", errText, { status: r.status });
       throw new Error(errText || `HTTP ${r.status}`);
     }
 
@@ -1195,6 +1626,7 @@ async function sendMessage(): Promise<void> {
       const rollbackN = checkForRollbackCommand(accumulated);
       if (rollbackN !== null) {
         console.log(`[consolidation] model issued ROLLBACK_CONSOLIDATION:${rollbackN}`);
+        clientLog("info", "consolidation.rollback_command_detected", "", { n: rollbackN });
         rollbackConsolidation(rollbackN, "model");
       }
     }
@@ -1212,16 +1644,20 @@ async function sendMessage(): Promise<void> {
         if (currentTurnPatches.length > 0) {
           const est = estimateTokens(currentTurnPatches);
           console.log(`[consolidation] all inline patches done (${currentTurnPatches.length} patch(es), ~${est} tokens), requesting summary`);
+          clientLog("info", "consolidation.inline_patches_done", "", { patches: currentTurnPatches.length, estimated_tokens: est });
           runConsolidationPass(asstDiv, currentTurnPatches.slice());
         } else {
           console.log("[consolidation] all patches returned UNCHANGED, skipping");
+          clientLog("info", "consolidation.no_changed_inline_patches");
         }
       });
     }
+    clientLog("info", "chat.send.done", "", { assistant_chars: accumulated.length });
 
   } catch (e: any) {
     asstContent.innerHTML = `<span style="color:#fca5a5">Error: ${e.message || e}</span>`;
     chatHistoryArr.pop();
+    clientLog("error", "chat.send.failed", e.message || String(e));
   } finally {
     streaming = false;
     chatSend.disabled = false;
@@ -1234,23 +1670,36 @@ chatInput.addEventListener("keydown", (e) => {
   if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
 });
 chatClear.addEventListener("click", () => {
-  if (!confirm("Clear conversation?")) return;
-  chatHistoryArr = []; blockCounter = 0; stepCounter = 0;
-  currentTurnPatches = []; lastConsolidationSummary = null;
-  consolidationHistory = []; consolidationVersionCounter = 0;
-  chatMessages.innerHTML = "";
-  sessionStorage.removeItem(HISTORY_KEY);
-  syncUndoBtn();
+  const c = activeChat();
+  if (!c || c.messages.length === 0) return;
+  if (!confirm("Clear this conversation?")) return;
+  clientLog("info", "chat.clear", "", { id: c.id, previous_messages: c.messages.length });
+  c.messages.length = 0;
+  c.title = "New chat";
+  c.updatedAt = Date.now();
+  persistChats();
+  renderChatList();
+  refreshActiveChat();
+});
+
+newChatBtn.addEventListener("click", () => {
+  if (streaming) return;
+  // If the current chat is empty, just stay on it instead of stacking empties.
+  const c = activeChat();
+  if (c && c.messages.length === 0) return;
+  createNewChat(true);
 });
 
 // ========================================================================
 // ==================== INIT =============================================
 // ========================================================================
+clientLog("info", "frontend.init.start");
 loadLauncherSettings();
 loadConfigFallback();
 syncPatcherBlock();
 hydrateProfileForm();
 loadHistory();
+clientLog("info", "frontend.init.done");
 connectWs();
 pollStatus();
 setInterval(pollStatus, 3000);

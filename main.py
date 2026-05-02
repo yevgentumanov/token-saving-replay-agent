@@ -3,6 +3,7 @@ import asyncio
 import atexit
 import errno
 import json
+import logging
 import os
 import platform
 import re
@@ -12,23 +13,44 @@ import signal
 import subprocess
 import sys
 import threading
+import time
 import webbrowser
 from pathlib import Path
 from typing import Optional
+
+# Embeddable Python (used by start.bat) omits CWD from sys.path.
+_base_dir = Path(__file__).parent
+if str(_base_dir) not in sys.path:
+    sys.path.insert(0, str(_base_dir))
 
 import httpx
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request, WebSocket, WebSocketDisconnect
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, JSONResponse, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from app_logging import (
+    APP_LOG_FILE,
+    FRONTEND_LOG_FILE,
+    STARTUP_LOG_FILE,
+    append_frontend_event,
+    get_logger,
+    log_error,
+    log_event,
+    log_warning,
+    recent_log_lines,
+    setup_logging,
+)
 import consolidation
 from consolidation import PatchRecord, run_consolidation_pass
 import keeper
 from keeper import KeeperSession, run_keeper_review, keeper_session_init
 from llm_clients import make_client
+
+setup_logging()
+logger = get_logger(__name__)
 
 BASE_DIR = Path(__file__).parent
 CONFIG_FILE = BASE_DIR / "config.json"
@@ -56,17 +78,29 @@ DEFAULT_CONFIG = {
 
 def load_config() -> dict:
     if CONFIG_FILE.exists():
-        with open(CONFIG_FILE) as f:
-            return {**DEFAULT_CONFIG, **json.load(f)}
+        try:
+            with open(CONFIG_FILE) as f:
+                config = {**DEFAULT_CONFIG, **json.load(f)}
+            log_event(logger, "config.loaded", path=str(CONFIG_FILE))
+            return config
+        except Exception as exc:
+            log_error(logger, "config.load_failed", exc, path=str(CONFIG_FILE))
+            raise
+    log_event(logger, "config.default_used", path=str(CONFIG_FILE))
     return DEFAULT_CONFIG.copy()
 
 
 def save_config(data: dict):
     with open(CONFIG_FILE, "w") as f:
         json.dump(data, f, indent=2)
+    safe_keys = sorted(k for k in data.keys() if "api_key" not in k)
+    log_event(logger, "config.saved", path=str(CONFIG_FILE), keys=safe_keys)
 
 
 def find_llama_server() -> str:
+    bundled = BASE_DIR / "bin" / ("llama-server.exe" if platform.system() == "Windows" else "llama-server")
+    if bundled.exists():
+        return str(bundled)
     found = shutil.which("llama-server")
     if found:
         return found
@@ -138,8 +172,10 @@ def _version_from_output(output: str, prefix: str = "") -> str:
 def _safe_tool_check(command: list[str], prefix: str = "") -> dict:
     executable = shutil.which(command[0])
     if not executable:
+        log_event(logger, "environment.tool_check.missing", command=command[0])
         return {"found": False, "version": ""}
     try:
+        log_event(logger, "environment.tool_check.start", command=command[:2])
         result = subprocess.run(
             [executable, *command[1:]],
             shell=False,
@@ -149,14 +185,18 @@ def _safe_tool_check(command: list[str], prefix: str = "") -> dict:
             encoding="utf-8",
             errors="replace",
         )
-    except (OSError, subprocess.SubprocessError):
+    except (OSError, subprocess.SubprocessError) as exc:
+        log_warning(logger, "environment.tool_check.failed", command=command[:2], error=str(exc))
         return {"found": False, "version": ""}
     output = "\n".join(part for part in [result.stdout, result.stderr] if part)
     version = _version_from_output(output, prefix)
-    return {"found": result.returncode == 0 or bool(version), "version": version}
+    found = result.returncode == 0 or bool(version)
+    log_event(logger, "environment.tool_check.done", command=command[0], found=found, version=version)
+    return {"found": found, "version": version}
 
 
 def detect_environment() -> dict:
+    log_event(logger, "environment.detect.start")
     os_name = _normalize_os_name()
     distro = _read_linux_distro() if os_name == "Linux" else ""
     tools = {
@@ -176,7 +216,7 @@ def detect_environment() -> dict:
         "cargo": _safe_tool_check(["cargo", "--version"], "cargo"),
         "dotnet": _safe_tool_check(["dotnet", "--version"]),
     }
-    return {
+    result = {
         "app_version": APP_VERSION,
         "os": {
             "name": os_name,
@@ -187,6 +227,14 @@ def detect_environment() -> dict:
         "shell": {"guess": _guess_shell()},
         "tools": tools,
     }
+    log_event(
+        logger,
+        "environment.detect.done",
+        os=result["os"]["name"],
+        shell=result["shell"]["guess"],
+        tools={name: value["found"] for name, value in tools.items()},
+    )
+    return result
 
 
 # --- Global state ---
@@ -205,6 +253,8 @@ class State:
     provider_b: str = "local"
     client_a: Optional[object] = None  # BaseLLMClient
     client_b: Optional[object] = None  # BaseLLMClient
+    last_error_a: str = ""
+    last_error_b: str = ""
 
     @classmethod
     def alive(cls, proc) -> bool:
@@ -217,7 +267,12 @@ state = State()
 keeper_session = KeeperSession()
 
 
+_DLL_CODES = {-1073741515, 3221225477}  # 0xC0000135 STATUS_DLL_NOT_FOUND
+
 def _read_stream(stream, label: str, vram_flag: str, proc_ref: list):
+    error_attr = f"last_error_{label.lower()}"
+    log_event(logger, "model.stream_reader.start", label=label)
+    recent_lines: list[str] = []
     try:
         for line in iter(stream.readline, b""):
             text = line.decode("utf-8", errors="replace").rstrip()
@@ -226,37 +281,63 @@ def _read_stream(stream, label: str, vram_flag: str, proc_ref: list):
             low = text.lower()
             if "out of memory" in low or ("vram" in low and "error" in low):
                 setattr(state, vram_flag, True)
+                log_warning(logger, "model.vram_error_detected", label=label, line=text[:1000])
+            recent_lines.append(text)
+            if len(recent_lines) > 10:
+                recent_lines.pop(0)
             tagged = f"[{label}] {text}"
+            log_event(logger, "model.output", label=label, line=text[:2000])
             if state.loop and state.log_queue and not state.log_queue.full():
                 asyncio.run_coroutine_threadsafe(state.log_queue.put(tagged), state.loop)
-    except Exception:
-        pass
+    except Exception as exc:
+        log_error(logger, "model.stream_reader.error", exc, label=label)
     finally:
         proc = proc_ref[0] if proc_ref else None
         code = proc.poll() if proc else None
         if code is not None and code != 0:
-            msg = f"[{label}] Process exited with code {code}. Check arguments (for example -ngl) or model path."
+            if code in _DLL_CODES:
+                hint = f"Exit {code} (DLL not found — run start.bat again to re-extract llama-server + DLLs)"
+            else:
+                hint = f"Exit code {code}"
+            tail = " | ".join(recent_lines[-3:]) if recent_lines else ""
+            error_msg = f"{hint}. {tail}" if tail else hint
+            setattr(state, error_attr, error_msg)
+            msg = f"[{label}] {error_msg}"
+            log_warning(logger, "model.process.exited_nonzero", label=label, code=code)
             if state.loop and state.log_queue and not state.log_queue.full():
                 asyncio.run_coroutine_threadsafe(state.log_queue.put(msg), state.loop)
+        log_event(logger, "model.stream_reader.stop", label=label, code=code)
 
 
 def _kill(proc: Optional[subprocess.Popen]):
     if proc and proc.poll() is None:
+        log_event(logger, "model.process.terminate", pid=proc.pid)
         proc.terminate()
         try:
             proc.wait(timeout=5)
         except subprocess.TimeoutExpired:
+            log_warning(logger, "model.process.kill_after_timeout", pid=proc.pid)
             proc.kill()
 
 
 def stop_all():
+    log_event(
+        logger,
+        "models.stop_all.start",
+        proc_a=state.proc_a.pid if state.alive(state.proc_a) else None,
+        proc_b=state.proc_b.pid if state.alive(state.proc_b) else None,
+        provider_a=state.provider_a,
+        provider_b=state.provider_b,
+    )
     _kill(state.proc_a)
     _kill(state.proc_b)
     state.proc_a = state.proc_b = None
     state.healthy_a = state.healthy_b = False
     state.vram_a = state.vram_b = False
+    state.last_error_a = state.last_error_b = ""
     state.client_a = state.client_b = None
     state.provider_a = state.provider_b = "local"
+    log_event(logger, "models.stop_all.done")
 
 
 atexit.register(stop_all)
@@ -265,6 +346,8 @@ if platform.system() != "Windows":
 
 
 async def _health(flag: str, proc_attr: str, port_attr: str, provider_attr: str, client_attr: str):
+    log_event(logger, "health.loop.start", flag=flag)
+    last_result = None
     async with httpx.AsyncClient(timeout=3.0) as client:
         while True:
             await asyncio.sleep(4)
@@ -279,29 +362,61 @@ async def _health(flag: str, proc_attr: str, port_attr: str, provider_attr: str,
                 else:
                     result = False
                 setattr(state, flag, result)
+                if result != last_result:
+                    log_event(
+                        logger,
+                        "health.changed",
+                        flag=flag,
+                        provider=getattr(state, provider_attr),
+                        healthy=result,
+                    )
+                    last_result = result
                 continue
             # Local provider: check if the subprocess is alive then probe /v1/models
             proc = getattr(state, proc_attr)
             if not state.alive(proc):
                 setattr(state, flag, False)
+                if last_result is not False:
+                    log_event(logger, "health.changed", flag=flag, provider="local", healthy=False, reason="process_not_alive")
+                    last_result = False
                 continue
             port = getattr(state, port_attr)
             try:
                 r = await client.get(f"http://127.0.0.1:{port}/v1/models")
-                setattr(state, flag, r.status_code == 200)
-            except Exception:
+                result = r.status_code == 200
+                setattr(state, flag, result)
+                if result != last_result:
+                    log_event(logger, "health.changed", flag=flag, provider="local", port=port, healthy=result, status_code=r.status_code)
+                    last_result = result
+            except Exception as exc:
                 setattr(state, flag, False)
+                if last_result is not False:
+                    log_warning(logger, "health.check_failed", flag=flag, port=port, error=str(exc))
+                    last_result = False
 
 
 def _launch(model_path: str, args: str, host: str, port: int, llama_bin: str):
     cmd = [llama_bin, "--model", model_path, "--host", host, "--port", str(port)]
     if args.strip():
         cmd += shlex.split(args)
+    log_event(
+        logger,
+        "model.launch.start",
+        llama_bin=llama_bin,
+        model_path=model_path,
+        host=host,
+        port=port,
+        args=args,
+    )
     try:
-        return subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
-    except FileNotFoundError:
+        proc = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=0)
+        log_event(logger, "model.launch.done", pid=proc.pid, port=port)
+        return proc
+    except FileNotFoundError as exc:
+        log_error(logger, "model.launch.binary_missing", exc, llama_bin=llama_bin)
         raise HTTPException(400, f"llama-server binary not found: {llama_bin}")
     except OSError as e:
+        log_error(logger, "model.launch.os_error", e, port=port, llama_bin=llama_bin)
         if e.errno == errno.EADDRINUSE or "10048" in str(e):
             raise HTTPException(400, f"Port {port} is already in use — change the port or stop the conflicting process")
         raise HTTPException(400, f"Failed to start: {e}")
@@ -309,6 +424,43 @@ def _launch(model_path: str, args: str, host: str, port: int, llama_bin: str):
 
 # --- FastAPI ---
 app = FastAPI()
+
+
+@app.middleware("http")
+async def log_http_requests(request: Request, call_next):
+    started = time.perf_counter()
+    log_event(
+        logger,
+        "http.request.start",
+        method=request.method,
+        path=request.url.path,
+        query=str(request.url.query)[:500],
+        client=request.client.host if request.client else "",
+    )
+    try:
+        response = await call_next(request)
+    except Exception as exc:
+        elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+        log_error(
+            logger,
+            "http.request.exception",
+            exc,
+            method=request.method,
+            path=request.url.path,
+            elapsed_ms=elapsed_ms,
+        )
+        raise
+    elapsed_ms = round((time.perf_counter() - started) * 1000, 2)
+    level_logger = log_warning if response.status_code >= 400 else log_event
+    level_logger(
+        logger,
+        "http.request.done",
+        method=request.method,
+        path=request.url.path,
+        status_code=response.status_code,
+        elapsed_ms=elapsed_ms,
+    )
+    return response
 
 # Allow VS Code webview panels (vscode-webview://*) and local browser dev
 app.add_middleware(
@@ -324,17 +476,20 @@ app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
 
 @app.on_event("startup")
 async def startup():
+    log_event(logger, "app.startup", version=APP_VERSION, base_dir=str(BASE_DIR), log_dir=str(APP_LOG_FILE.parent))
     state.loop = asyncio.get_event_loop()
     state.log_queue = asyncio.Queue(maxsize=1000)
     asyncio.create_task(_health("healthy_a", "proc_a", "port_a", "provider_a", "client_a"))
     asyncio.create_task(_health("healthy_b", "proc_b", "port_b", "provider_b", "client_b"))
     import os
     if not os.environ.get("LLAMA_NO_BROWSER"):
+        log_event(logger, "app.open_browser.scheduled", url="http://localhost:7860")
         threading.Timer(1.2, lambda: webbrowser.open("http://localhost:7860")).start()
 
 
 @app.get("/")
 async def index():
+    log_event(logger, "ui.index")
     return FileResponse(STATIC_DIR / "index.html")
 
 
@@ -363,11 +518,24 @@ def _model_ready(which: str) -> bool:
 
 @app.post("/api/start")
 async def api_start(req: StartRequest):
+    log_event(
+        logger,
+        "api.start.request",
+        model_a_provider=req.model_a.provider,
+        model_a_port=req.model_a.port,
+        model_a_has_path=bool(req.model_a.path),
+        model_b_enabled=req.model_b is not None,
+        model_b_provider=req.model_b.provider if req.model_b else "",
+        model_b_port=req.model_b.port if req.model_b else None,
+        host=req.host,
+        llama_server_path_set=bool(req.llama_server_path.strip()),
+    )
     already = (
         state.alive(state.proc_a) or state.alive(state.proc_b)
         or state.client_a is not None or state.client_b is not None
     )
     if already:
+        log_warning(logger, "api.start.rejected_already_running")
         raise HTTPException(400, "Already running; stop first")
 
     cfg = load_config()
@@ -376,22 +544,28 @@ async def api_start(req: StartRequest):
     # Validate model A
     if req.model_a.provider == "local":
         if not req.model_a.path or not Path(req.model_a.path).exists():
+            log_warning(logger, "api.start.model_a_missing", path=req.model_a.path)
             raise HTTPException(400, f"Model A not found: {req.model_a.path}")
     else:
         if not req.model_a.api_key.strip():
+            log_warning(logger, "api.start.model_a_api_key_missing", provider=req.model_a.provider)
             raise HTTPException(400, "Model A: API key is required for cloud providers")
         if not req.model_a.cloud_model.strip():
+            log_warning(logger, "api.start.model_a_cloud_model_missing", provider=req.model_a.provider)
             raise HTTPException(400, "Model A: cloud model ID is required")
 
     # Validate model B (if present)
     if req.model_b:
         if req.model_b.provider == "local":
             if not req.model_b.path or not Path(req.model_b.path).exists():
+                log_warning(logger, "api.start.model_b_missing", path=req.model_b.path)
                 raise HTTPException(400, f"Model B not found: {req.model_b.path}")
         else:
             if not req.model_b.api_key.strip():
+                log_warning(logger, "api.start.model_b_api_key_missing", provider=req.model_b.provider)
                 raise HTTPException(400, "Model B: API key is required for cloud providers")
             if not req.model_b.cloud_model.strip():
+                log_warning(logger, "api.start.model_b_cloud_model_missing", provider=req.model_b.provider)
                 raise HTTPException(400, "Model B: cloud model ID is required")
 
     # Port collision check only between two local models
@@ -401,9 +575,11 @@ async def api_start(req: StartRequest):
         and req.model_b.provider == "local"
         and req.model_a.port == req.model_b.port
     ):
+        log_warning(logger, "api.start.port_collision", port=req.model_a.port)
         raise HTTPException(400, f"Model A and B cannot use the same port ({req.model_a.port})")
 
     state.vram_a = state.vram_b = False
+    state.last_error_a = state.last_error_b = ""
 
     # --- Launch Model A ---
     state.provider_a = req.model_a.provider
@@ -423,6 +599,7 @@ async def api_start(req: StartRequest):
         threading.Thread(target=_read_stream, args=(proc_a.stdout, "A", "vram_a", [proc_a]), daemon=True).start()
     else:
         state.healthy_a = await state.client_a.health_check()
+        log_event(logger, "model.cloud.connected", label="A", provider=req.model_a.provider, model=req.model_a.cloud_model, healthy=state.healthy_a)
         log_msg = f"[A] Connected to {req.model_a.provider}: {req.model_a.cloud_model}"
         if state.loop and state.log_queue and not state.log_queue.full():
             await state.log_queue.put(log_msg)
@@ -446,6 +623,7 @@ async def api_start(req: StartRequest):
             threading.Thread(target=_read_stream, args=(proc_b.stdout, "B", "vram_b", [proc_b]), daemon=True).start()
         else:
             state.healthy_b = await state.client_b.health_check()
+            log_event(logger, "model.cloud.connected", label="B", provider=req.model_b.provider, model=req.model_b.cloud_model, healthy=state.healthy_b)
             log_msg = f"[B] Connected to {req.model_b.provider}: {req.model_b.cloud_model}"
             if state.loop and state.log_queue and not state.log_queue.full():
                 await state.log_queue.put(log_msg)
@@ -468,11 +646,13 @@ async def api_start(req: StartRequest):
     )
     save_config(cfg)
 
+    log_event(logger, "api.start.done", pid_a=pid_a, pid_b=pid_b, provider_a=state.provider_a, provider_b=state.provider_b)
     return {"ok": True, "pid_a": pid_a, "pid_b": pid_b}
 
 
 @app.post("/api/stop")
 async def api_stop():
+    log_event(logger, "api.stop.request")
     stop_all()
     return {"ok": True}
 
@@ -481,7 +661,7 @@ async def api_stop():
 async def api_status():
     running_a = state.alive(state.proc_a) if state.provider_a == "local" else state.client_a is not None
     running_b = state.alive(state.proc_b) if state.provider_b == "local" else state.client_b is not None
-    return {
+    result = {
         "a": {
             "running": running_a,
             "healthy": state.healthy_a,
@@ -489,6 +669,7 @@ async def api_status():
             "pid": state.proc_a.pid if state.alive(state.proc_a) else None,
             "port": state.port_a,
             "provider": state.provider_a,
+            "last_error": state.last_error_a,
         },
         "b": {
             "running": running_b,
@@ -497,13 +678,29 @@ async def api_status():
             "pid": state.proc_b.pid if state.alive(state.proc_b) else None,
             "port": state.port_b,
             "provider": state.provider_b,
+            "last_error": state.last_error_b,
         },
     }
+    log_event(
+        logger,
+        "api.status",
+        a_running=running_a,
+        a_healthy=state.healthy_a,
+        b_running=running_b,
+        b_healthy=state.healthy_b,
+        provider_a=state.provider_a,
+        provider_b=state.provider_b,
+    )
+    return result
 
 
 @app.get("/api/config")
 async def api_get_config():
-    return load_config()
+    cfg = load_config()
+    if not cfg.get("llama_server_path"):
+        cfg["llama_server_path"] = find_llama_server()
+    log_event(logger, "api.config", llama_server_path=cfg.get("llama_server_path", ""))
+    return cfg
 
 
 @app.get("/api/diagnostics")
@@ -517,12 +714,20 @@ async def api_diagnostics():
     llama_bin = cfg.get("llama_server_path") or find_llama_server()
     provider_a = state.provider_a if state.client_a or state.alive(state.proc_a) else cfg.get("model_a_provider", "local")
     provider_b = state.provider_b if state.client_b or state.alive(state.proc_b) else cfg.get("model_b_provider", "local")
-    return {
+    result = {
         "app_version": APP_VERSION,
         "python_version": platform.python_version(),
         "platform": platform.platform(),
         "config_exists": CONFIG_FILE.exists(),
         "llama_server_path_exists": _path_exists(llama_bin),
+        "logs": {
+            "startup_log": str(STARTUP_LOG_FILE),
+            "app_log": str(APP_LOG_FILE),
+            "frontend_log": str(FRONTEND_LOG_FILE),
+            "startup_log_exists": STARTUP_LOG_FILE.exists(),
+            "app_log_exists": APP_LOG_FILE.exists(),
+            "frontend_log_exists": FRONTEND_LOG_FILE.exists(),
+        },
         "model_a": {
             "provider": provider_a,
             "path_exists": _path_exists(cfg.get("model_a_path", "")),
@@ -540,6 +745,53 @@ async def api_diagnostics():
             "port": state.port_b,
         },
     }
+    log_event(logger, "api.diagnostics", app_log_exists=APP_LOG_FILE.exists(), frontend_log_exists=FRONTEND_LOG_FILE.exists())
+    return result
+
+
+class FrontendLogEvent(BaseModel):
+    level: str = "info"
+    event: str
+    message: str = ""
+    data: dict = {}
+    ts: Optional[float] = None
+    url: str = ""
+
+
+@app.post("/api/log/frontend")
+async def api_log_frontend(event: FrontendLogEvent):
+    payload = event.model_dump()
+    append_frontend_event(payload)
+    level = payload.get("level", "info")
+    log_payload = {
+        "frontend_event": payload.get("event", ""),
+        "frontend_level": level,
+        "frontend_message": payload.get("message", ""),
+        "frontend_data": payload.get("data", {}),
+        "frontend_ts": payload.get("ts"),
+        "url": payload.get("url", ""),
+    }
+    if level in {"error", "fatal"}:
+        log_error(logger, "frontend.event", **log_payload)
+    elif level == "warn":
+        log_warning(logger, "frontend.event", **log_payload)
+    else:
+        log_event(logger, "frontend.event", **log_payload)
+    return {"ok": True}
+
+
+@app.get("/api/logs/recent")
+async def api_logs_recent(lines: int = 80):
+    max_lines = min(max(lines, 1), 500)
+    log_event(logger, "api.logs_recent", lines=max_lines)
+    return {
+        "startup_log": str(STARTUP_LOG_FILE),
+        "app_log": str(APP_LOG_FILE),
+        "frontend_log": str(FRONTEND_LOG_FILE),
+        "startup": recent_log_lines(STARTUP_LOG_FILE, max_lines),
+        "app": recent_log_lines(APP_LOG_FILE, max_lines),
+        "frontend": recent_log_lines(FRONTEND_LOG_FILE, max_lines),
+    }
 
 
 @app.get("/api/environment/detect")
@@ -553,6 +805,7 @@ async def api_environment_detect():
 
 @app.get("/api/open-file-dialog")
 async def api_open_file_dialog(type: str = "model"):
+    log_event(logger, "api.file_dialog.open", type=type)
     try:
         import tkinter as tk
         from tkinter import filedialog
@@ -567,27 +820,48 @@ async def api_open_file_dialog(type: str = "model"):
             title = "Select GGUF model"
         path = filedialog.askopenfilename(title=title, filetypes=filetypes)
         root.destroy()
+        log_event(logger, "api.file_dialog.done", type=type, selected=bool(path))
         return {"path": path or ""}
     except Exception as e:
+        log_error(logger, "api.file_dialog.failed", e, type=type)
         raise HTTPException(500, f"File dialog failed: {e}")
 
 
 @app.post("/api/chat/main")
 async def chat_main(request: Request):
     if not _model_ready("a"):
+        log_warning(logger, "chat.main.rejected_not_ready")
         raise HTTPException(400, "Main model (A) is not running or not configured")
     body = await request.json()
+    messages = body.get("messages", [])
+    log_event(
+        logger,
+        "chat.main.start",
+        provider=state.provider_a,
+        message_count=len(messages),
+        roles=[m.get("role", "") for m in messages if isinstance(m, dict)],
+        char_count=sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict)),
+        temperature=body.get("temperature", 0.7),
+        max_tokens=body.get("max_tokens", 4096),
+    )
 
     async def event_stream():
+        chunk_count = 0
+        byte_count = 0
         try:
             async for chunk in state.client_a.chat_stream(
-                messages=body.get("messages", []),
+                messages=messages,
                 temperature=body.get("temperature", 0.7),
                 max_tokens=body.get("max_tokens", 4096),
             ):
+                chunk_count += 1
+                byte_count += len(chunk)
                 yield chunk
         except Exception as e:
+            log_error(logger, "chat.main.stream_error", e, chunks=chunk_count, bytes=byte_count)
             yield f'data: {{"error": "{str(e)}"}}\n\n'.encode()
+        finally:
+            log_event(logger, "chat.main.done", chunks=chunk_count, bytes=byte_count)
 
     return StreamingResponse(event_stream(), media_type="text/event-stream")
 
@@ -595,16 +869,38 @@ async def chat_main(request: Request):
 @app.post("/api/chat/patcher")
 async def chat_patcher(request: Request):
     if not _model_ready("b"):
+        log_warning(logger, "chat.patcher.rejected_not_ready")
         raise HTTPException(400, "Patcher model (B) is not running; start it first")
     body = await request.json()
+    messages = body.get("messages", [])
+    log_event(
+        logger,
+        "chat.patcher.start",
+        provider=state.provider_b,
+        message_count=len(messages),
+        roles=[m.get("role", "") for m in messages if isinstance(m, dict)],
+        char_count=sum(len(str(m.get("content", ""))) for m in messages if isinstance(m, dict)),
+        temperature=body.get("temperature", 0.1),
+        max_tokens=body.get("max_tokens", 1024),
+    )
     try:
         result = await state.client_b.chat_complete(
-            messages=body.get("messages", []),
+            messages=messages,
             temperature=body.get("temperature", 0.1),
             max_tokens=body.get("max_tokens", 1024),
         )
+        choice = (result.get("choices") or [{}])[0]
+        message = choice.get("message", {}) if isinstance(choice, dict) else {}
+        log_event(
+            logger,
+            "chat.patcher.done",
+            finish_reason=choice.get("finish_reason") if isinstance(choice, dict) else "",
+            response_chars=len(str(message.get("content", ""))),
+            has_reasoning=bool(message.get("reasoning_content")),
+        )
         return result
     except Exception as e:
+        log_error(logger, "chat.patcher.failed", e)
         raise HTTPException(500, f"Patcher request failed: {e}")
 
 
@@ -626,22 +922,43 @@ async def api_consolidation(req: ConsolidationRequestBody):
     then returns the result for injection into the next main-model system prompt.
     """
     if not _model_ready("b"):
+        log_warning(logger, "consolidation.rejected_not_ready")
         raise HTTPException(400, "Patcher model (B) is not running; cannot run Consolidation Pass")
     if not req.patches:
+        log_event(logger, "consolidation.empty")
         return {"changed_steps": [], "summary": "", "state_delta": "", "patch_count": 0, "mode": "lightweight"}
+    log_event(
+        logger,
+        "consolidation.start",
+        patch_count=len(req.patches),
+        sources=[p.source for p in req.patches],
+        langs=[p.lang for p in req.patches],
+    )
     result = await run_consolidation_pass(state.client_b, req.patches)
     if result is None:
+        log_warning(logger, "consolidation.failed")
         raise HTTPException(500, "Consolidation Pass failed; check patcher logs")
+    log_event(
+        logger,
+        "consolidation.done",
+        patch_count=result.patch_count,
+        mode=result.mode,
+        changed_steps=len(result.changed_steps),
+        summary_chars=len(result.summary),
+        state_delta_chars=len(result.state_delta),
+    )
     return result.model_dump()
 
 
 @app.get("/api/consolidation/config")
 async def api_consolidation_config_get():
     """Return current smart-threshold values."""
-    return {
+    result = {
         "patch_threshold": consolidation.CONSOLIDATION_PATCH_THRESHOLD,
         "token_threshold": consolidation.CONSOLIDATION_TOKEN_THRESHOLD,
     }
+    log_event(logger, "consolidation.config.get", **result)
+    return result
 
 
 @app.post("/api/consolidation/config")
@@ -652,16 +969,20 @@ async def api_consolidation_config_set(body: ConsolidationConfigBody):
     """
     if body.patch_threshold is not None:
         if body.patch_threshold < 1:
+            log_warning(logger, "consolidation.config.invalid_patch_threshold", value=body.patch_threshold)
             raise HTTPException(400, "patch_threshold must be >= 1")
         consolidation.CONSOLIDATION_PATCH_THRESHOLD = body.patch_threshold
     if body.token_threshold is not None:
         if body.token_threshold < 1:
+            log_warning(logger, "consolidation.config.invalid_token_threshold", value=body.token_threshold)
             raise HTTPException(400, "token_threshold must be >= 1")
         consolidation.CONSOLIDATION_TOKEN_THRESHOLD = body.token_threshold
-    return {
+    result = {
         "patch_threshold": consolidation.CONSOLIDATION_PATCH_THRESHOLD,
         "token_threshold": consolidation.CONSOLIDATION_TOKEN_THRESHOLD,
     }
+    log_event(logger, "consolidation.config.set", **result)
+    return result
 
 
 # Concept Keeper v-1
@@ -673,7 +994,9 @@ class KeeperReviewRequest(BaseModel):
 @app.get("/api/keeper/status")
 async def api_keeper_status():
     """Return the current Keeper session state (turn count, drift, last reset, etc.)."""
-    return keeper.get_status(keeper_session).model_dump()
+    result = keeper.get_status(keeper_session).model_dump()
+    log_event(logger, "keeper.status", state=result.get("state"), turn_count=result.get("turn_count"))
+    return result
 
 
 @app.post("/api/keeper/review")
@@ -683,15 +1006,25 @@ async def api_keeper_review(req: KeeperReviewRequest):
     Uses Model B. Returns APPROVED / REJECTED / WARNING / HARD_RESET verdict.
     """
     if not _model_ready("b"):
+        log_warning(logger, "keeper.review.rejected_not_ready")
         raise HTTPException(400, "Patcher model (B) is not running; Keeper requires Model B")
     if not req.request.strip():
+        log_warning(logger, "keeper.review.empty_request")
         raise HTTPException(400, "request must not be empty")
+    log_event(logger, "keeper.review.start", request_chars=len(req.request))
 
     # Lazy init: initialize the session on first review if not already done
     if not keeper_session.concept_md_loaded:
         await keeper_session_init(state.client_b, keeper_session)
 
     verdict = await run_keeper_review(state.client_b, keeper_session, req.request)
+    log_event(
+        logger,
+        "keeper.review.done",
+        status=verdict.status,
+        drift=verdict.concept_drift,
+        turn=verdict.turn,
+    )
 
     # If Keeper issued a Hard Reset, re-init so it's ready for the next review
     if verdict.status == "HARD_RESET":
@@ -703,6 +1036,7 @@ async def api_keeper_review(req: KeeperReviewRequest):
 @app.post("/api/keeper/reset")
 async def api_keeper_reset():
     """Force a Keeper Hard Reset; re-reads CONCEPT.md and clears turn history."""
+    log_event(logger, "keeper.reset.request", model_b_ready=_model_ready("b"))
     if not _model_ready("b"):
         # Reset the session state even without Model B (no re-init needed without a model)
         keeper.hard_reset(keeper_session)
@@ -714,6 +1048,7 @@ async def api_keeper_reset():
 @app.websocket("/ws/logs")
 async def ws_logs(ws: WebSocket):
     await ws.accept()
+    log_event(logger, "ws.logs.connected", client=ws.client.host if ws.client else "")
     try:
         while True:
             try:
@@ -721,9 +1056,12 @@ async def ws_logs(ws: WebSocket):
                 await ws.send_text(line)
             except asyncio.TimeoutError:
                 await ws.send_text("\x00")
-    except (WebSocketDisconnect, Exception):
-        pass
+    except WebSocketDisconnect:
+        log_event(logger, "ws.logs.disconnected")
+    except Exception as exc:
+        log_error(logger, "ws.logs.error", exc)
 
 
 if __name__ == "__main__":
+    log_event(logger, "app.run", host="127.0.0.1", port=7860)
     uvicorn.run(app, host="127.0.0.1", port=7860, log_level="warning")
