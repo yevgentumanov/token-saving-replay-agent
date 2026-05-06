@@ -1,5 +1,10 @@
 "use strict";
 // app.ts - Compile: npx tsc --target ES2020 --lib ES2020,DOM --strict --outDir static static/app.ts
+function messageText(m) {
+    if (typeof m.content === "string")
+        return m.content;
+    return m.content.filter(p => p.type === "text").map(p => p.text).join("\n");
+}
 // ===== Helpers =====
 const $ = (id) => document.getElementById(id);
 // Detect VS Code webview iframe mode (chatPanel.ts passes ?vscode=1 in the iframe URL)
@@ -781,7 +786,7 @@ function deriveTitle(messages) {
     const firstUser = messages.find(m => m.role === "user");
     if (!firstUser)
         return "New chat";
-    const t = firstUser.content.trim().replace(/\s+/g, " ");
+    const t = messageText(firstUser).trim().replace(/\s+/g, " ");
     return t.length > 40 ? t.slice(0, 40) + "…" : (t || "New chat");
 }
 function renderChatList() {
@@ -961,7 +966,8 @@ function checkChatReadiness() {
     }
 }
 function renderMessage(msg) {
-    clientLog("debug", "chat.message.render", "", { role: msg.role, chars: msg.content.length });
+    const text = messageText(msg);
+    clientLog("debug", "chat.message.render", "", { role: msg.role, chars: text.length });
     const wrap = document.createElement("div");
     wrap.className = "msg " + (msg.role === "user" ? "msg-user" : "msg-asst");
     const role = document.createElement("div");
@@ -970,13 +976,34 @@ function renderMessage(msg) {
     const content = document.createElement("div");
     content.className = "msg-content";
     if (msg.role === "assistant") {
-        renderAssistantContent(content, msg.content);
+        renderAssistantContent(content, text);
     }
     else {
-        content.textContent = msg.content;
+        content.textContent = text;
     }
     wrap.appendChild(role);
     wrap.appendChild(content);
+    if (msg.attachments && msg.attachments.length > 0) {
+        const att = document.createElement("div");
+        att.className = "msg-attachments";
+        for (const a of msg.attachments) {
+            if (a.kind === "image") {
+                const img = document.createElement("img");
+                img.className = "msg-attachment-img";
+                img.src = a.data;
+                img.alt = a.name;
+                img.title = a.name;
+                att.appendChild(img);
+            }
+            else {
+                const span = document.createElement("span");
+                span.className = "msg-attachment-file";
+                span.textContent = `📄 ${a.name} (${formatBytes(a.size)})`;
+                att.appendChild(span);
+            }
+        }
+        wrap.appendChild(att);
+    }
     chatMessages.appendChild(wrap);
     chatMessages.scrollTop = chatMessages.scrollHeight;
     return wrap;
@@ -1470,26 +1497,256 @@ errSubmit.addEventListener("click", async () => {
         errSubmit.textContent = "Ask patcher";
     }
 });
+// ===== Attachments =====
+const chatFileInput = $("chatFileInput");
+const chatAttachBtn = $("chatAttach");
+const attachmentBar = $("attachmentBar");
+const attachmentWarn = $("attachmentWarning");
+const MAX_ATTACH_BYTES_TEXT = 256 * 1024; // 256 KB per text file
+const MAX_ATTACH_BYTES_IMAGE = 8 * 1024 * 1024; // 8 MB per image (data URL)
+const TEXT_EXT = new Set([
+    "txt", "md", "markdown", "log", "csv", "tsv", "json", "yaml", "yml", "toml", "ini", "cfg",
+    "py", "js", "ts", "tsx", "jsx", "mjs", "cjs", "html", "htm", "css", "scss", "sass",
+    "java", "kt", "kts", "go", "rs", "rb", "php", "c", "h", "cpp", "hpp", "cs", "swift", "sh",
+    "ps1", "psm1", "bat", "cmd", "sql", "xml", "env", "gitignore", "dockerfile", "makefile",
+]);
+let pendingAttachments = [];
+function formatBytes(n) {
+    if (n < 1024)
+        return `${n} B`;
+    if (n < 1024 * 1024)
+        return `${(n / 1024).toFixed(1)} KB`;
+    return `${(n / (1024 * 1024)).toFixed(1)} MB`;
+}
+function classifyFile(file) {
+    if (file.type.startsWith("image/"))
+        return "image";
+    if (file.type.startsWith("text/"))
+        return "text";
+    if (file.type === "application/json" || file.type === "application/xml")
+        return "text";
+    const ext = (file.name.split(".").pop() || "").toLowerCase();
+    if (TEXT_EXT.has(ext))
+        return "text";
+    if (file.name.toLowerCase() === "dockerfile" || file.name.toLowerCase() === "makefile")
+        return "text";
+    return "unknown";
+}
+function readFileAsText(file) {
+    return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(typeof r.result === "string" ? r.result : "");
+        r.onerror = () => reject(r.error);
+        r.readAsText(file);
+    });
+}
+function readFileAsDataURL(file) {
+    return new Promise((resolve, reject) => {
+        const r = new FileReader();
+        r.onload = () => resolve(typeof r.result === "string" ? r.result : "");
+        r.onerror = () => reject(r.error);
+        r.readAsDataURL(file);
+    });
+}
+function renderAttachments() {
+    attachmentBar.innerHTML = "";
+    if (pendingAttachments.length === 0) {
+        attachmentBar.classList.remove("show");
+    }
+    else {
+        attachmentBar.classList.add("show");
+        for (const a of pendingAttachments) {
+            const chip = document.createElement("div");
+            chip.className = "attachment-chip";
+            chip.title = `${a.name} (${a.mime || a.kind}, ${formatBytes(a.size)})`;
+            if (a.kind === "image") {
+                const img = document.createElement("img");
+                img.className = "att-thumb";
+                img.src = a.data;
+                chip.appendChild(img);
+            }
+            else {
+                const icon = document.createElement("span");
+                icon.textContent = "📄";
+                chip.appendChild(icon);
+            }
+            const name = document.createElement("span");
+            name.className = "att-name";
+            name.textContent = a.name;
+            chip.appendChild(name);
+            const size = document.createElement("span");
+            size.className = "att-size";
+            size.textContent = formatBytes(a.size);
+            chip.appendChild(size);
+            const rm = document.createElement("button");
+            rm.className = "att-remove";
+            rm.title = "Remove attachment";
+            rm.textContent = "×";
+            rm.addEventListener("click", () => {
+                pendingAttachments = pendingAttachments.filter(x => x.id !== a.id);
+                renderAttachments();
+                updateAttachmentWarning();
+            });
+            chip.appendChild(rm);
+            attachmentBar.appendChild(chip);
+        }
+    }
+    updateAttachmentWarning();
+}
+// Static vision-capability map. Keys are lowercased substrings matched against
+// either provider or full model id. Conservative: unknown → text-only.
+function isVisionModel(provider, modelId) {
+    const m = (modelId || "").toLowerCase();
+    if (!provider || provider === "local")
+        return false;
+    if (provider === "openai") {
+        return m.includes("gpt-4o") || m.includes("gpt-4-turbo")
+            || m.includes("gpt-4-vision") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4");
+    }
+    if (provider === "anthropic") {
+        // All current Claude 3+ family models accept images.
+        return m.includes("claude-3") || m.includes("claude-sonnet")
+            || m.includes("claude-opus") || m.includes("claude-haiku");
+    }
+    if (provider === "groq") {
+        return m.includes("vision") || m.includes("llama-4");
+    }
+    return false;
+}
+function activeModelAId() {
+    if (providerA.value === "local")
+        return "local";
+    return cloudModelSelectA.value === "__custom__" ? customModelA.value.trim() : cloudModelSelectA.value;
+}
+function updateAttachmentWarning() {
+    const hasImage = pendingAttachments.some(a => a.kind === "image");
+    if (!hasImage) {
+        attachmentWarn.classList.remove("show");
+        attachmentWarn.textContent = "";
+        return;
+    }
+    if (!isVisionModel(providerA.value, activeModelAId())) {
+        attachmentWarn.textContent = "Current model is text-only — images will be skipped on send.";
+        attachmentWarn.classList.add("show");
+    }
+    else {
+        attachmentWarn.classList.remove("show");
+        attachmentWarn.textContent = "";
+    }
+}
+async function handleFiles(files) {
+    if (!files || files.length === 0)
+        return;
+    for (const file of Array.from(files)) {
+        const kind = classifyFile(file);
+        if (kind === "unknown") {
+            alert(`"${file.name}": unsupported file type. Attach text files (.txt, .md, code, ...) or images.`);
+            continue;
+        }
+        if (kind === "text" && file.size > MAX_ATTACH_BYTES_TEXT) {
+            alert(`"${file.name}" is ${formatBytes(file.size)} — text attachments are capped at ${formatBytes(MAX_ATTACH_BYTES_TEXT)}.`);
+            continue;
+        }
+        if (kind === "image" && file.size > MAX_ATTACH_BYTES_IMAGE) {
+            alert(`"${file.name}" is ${formatBytes(file.size)} — image attachments are capped at ${formatBytes(MAX_ATTACH_BYTES_IMAGE)}.`);
+            continue;
+        }
+        try {
+            const data = kind === "image" ? await readFileAsDataURL(file) : await readFileAsText(file);
+            pendingAttachments.push({
+                id: Math.random().toString(36).slice(2),
+                kind,
+                name: file.name,
+                size: file.size,
+                mime: file.type || "",
+                data,
+            });
+        }
+        catch (e) {
+            clientLog("error", "chat.attachment.read_failed", String(e), { name: file.name });
+            alert(`Failed to read "${file.name}": ${e}`);
+        }
+    }
+    renderAttachments();
+}
+chatAttachBtn.addEventListener("click", () => chatFileInput.click());
+chatFileInput.addEventListener("change", async () => {
+    await handleFiles(chatFileInput.files);
+    chatFileInput.value = "";
+});
+providerA.addEventListener("change", updateAttachmentWarning);
+cloudModelSelectA.addEventListener("change", updateAttachmentWarning);
+customModelA.addEventListener("input", updateAttachmentWarning);
+// Drag-and-drop onto the chat input area
+chatInput.addEventListener("dragover", (e) => { e.preventDefault(); });
+chatInput.addEventListener("drop", async (e) => {
+    e.preventDefault();
+    if (e.dataTransfer && e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+        await handleFiles(e.dataTransfer.files);
+    }
+});
 // ===== Streaming send =====
 async function sendMessage() {
     const text = chatInput.value.trim();
-    if (!text || streaming)
+    if (streaming)
+        return;
+    if (!text && pendingAttachments.length === 0)
         return;
     if (!lastStatus?.a.running || !lastStatus.a.healthy) {
         checkChatReadiness();
         return;
     }
+    // Snapshot attachments and clear input *before* assembling the message.
+    const attachments = pendingAttachments.slice();
+    pendingAttachments = [];
+    const visionOk = isVisionModel(providerA.value, activeModelAId());
+    const textAtt = attachments.filter(a => a.kind === "text");
+    const imageAtt = attachments.filter(a => a.kind === "image");
+    const skippedImages = visionOk ? [] : imageAtt;
+    const usableImages = visionOk ? imageAtt : [];
+    // Compose the user-visible text: fenced blocks for text files + the user prompt.
+    const textBlocks = [];
+    for (const a of textAtt) {
+        const ext = (a.name.split(".").pop() || "").toLowerCase();
+        textBlocks.push(`File: ${a.name}\n\`\`\`${ext}\n${a.data}\n\`\`\``);
+    }
+    if (skippedImages.length > 0) {
+        const names = skippedImages.map(a => a.name).join(", ");
+        textBlocks.push(`(Skipped ${skippedImages.length} image attachment(s) — current model is text-only: ${names})`);
+    }
+    const composedText = [...textBlocks, text].filter(Boolean).join("\n\n");
+    // For models that accept images, send a content array; otherwise plain string.
+    let messageContent;
+    if (usableImages.length > 0) {
+        const parts = [];
+        if (composedText)
+            parts.push({ type: "text", text: composedText });
+        for (const a of usableImages)
+            parts.push({ type: "image_url", image_url: { url: a.data } });
+        messageContent = parts;
+    }
+    else {
+        messageContent = composedText;
+    }
     clientLog("info", "chat.send.start", "", {
-        user_chars: text.length,
+        user_chars: composedText.length,
         history_messages: chatHistoryArr.length,
         consolidation_pending: Boolean(lastConsolidationSummary),
         model_a_provider: lastStatus.a.provider,
         patcher_ready: Boolean(lastStatus.b.running && lastStatus.b.healthy && usePatcher.checked),
+        attachments_text: textAtt.length,
+        attachments_image_used: usableImages.length,
+        attachments_image_skipped: skippedImages.length,
     });
     chatInput.value = "";
-    const userMsg = { role: "user", content: text };
+    const userMsg = {
+        role: "user",
+        content: messageContent,
+        attachments: attachments.length > 0 ? attachments : undefined,
+    };
     chatHistoryArr.push(userMsg);
     renderMessage(userMsg);
+    renderAttachments();
     // Update sidebar title immediately so the new chat is identifiable while streaming.
     persistHistory();
     const asstMsg = { role: "assistant", content: "" };
@@ -1512,7 +1769,10 @@ async function sendMessage() {
     const body = {
         messages: [
             { role: "system", content: systemParts.join("") },
-            ...chatHistoryArr.filter(m => m.role !== "system").slice(0, -1),
+            ...chatHistoryArr
+                .filter(m => m.role !== "system")
+                .slice(0, -1)
+                .map(m => ({ role: m.role, content: m.content })),
         ],
         stream: true,
         temperature: 0.7,
