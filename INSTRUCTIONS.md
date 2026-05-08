@@ -46,8 +46,10 @@ Run `start.bat` from Explorer or a terminal. On first run it:
 2. Installs dependencies with `pip` into the portable environment
 3. Detects your GPU (NVIDIA CUDA, AMD/Intel Vulkan, or CPU)
 4. Downloads the matching `llama-server.exe` into `bin/`
-5. Asks for GGUF model paths
-6. Starts the app
+5. Starts the app
+
+Choose Model A and optional Model B from the web Launcher tab after the browser
+opens.
 
 To switch GPU backend, delete the `bin/` folder and re-run `start.bat`.
 Everything stays local — nothing is installed system-wide.

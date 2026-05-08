@@ -445,9 +445,7 @@ def _pick_file_powershell(title: str, initial_dir: str = "") -> str:
 
 
 def ensure_models(cfg: dict) -> tuple[dict, bool]:
-    """Prompt user to pick model files if not already configured."""
-    changed = False
-
+    """Report missing model files without prompting during startup."""
     model_a_missing = not cfg.get("model_a_path") or not Path(cfg["model_a_path"]).exists()
     model_b_missing = not cfg.get("model_b_path") or not Path(cfg["model_b_path"]).exists()
     append_startup_event("portable.models.check", model_a_missing=model_a_missing, model_b_missing=model_b_missing)
@@ -456,37 +454,13 @@ def ensure_models(cfg: dict) -> tuple[dict, bool]:
     if not model_a_missing and not model_b_missing:
         return cfg, False
 
-    step(3, 3, "Model selection ...")
+    step(3, 3, "Model setup ...")
     print()
-    print("  A file dialog will open for each model.")
-    print("  Press Cancel to skip; you can configure models later in the web UI.")
+    print("  Model files are not configured yet.")
+    print("  The web Launcher tab will open next; choose Model A and optional Model B there.")
     print()
-
-    if model_a_missing:
-        print("  --> Select your MAIN model (larger GGUF model, e.g. Qwen3-14B).")
-        path = _pick_file_powershell("Select MAIN model - GGUF")
-        if path:
-            cfg["model_a_path"] = path
-            changed = True
-            append_startup_event("portable.models.model_a_selected", path=path)
-            print(f"      Main model: {path}")
-        else:
-            append_startup_event("portable.models.model_a_skipped")
-            print("      Skipped. Configure it later in the web UI.")
-
-    if model_b_missing:
-        print("  --> Select your PATCHER model (small GGUF model, e.g. Qwen3-1.7B).")
-        path = _pick_file_powershell("Select PATCHER model - GGUF")
-        if path:
-            cfg["model_b_path"] = path
-            changed = True
-            append_startup_event("portable.models.model_b_selected", path=path)
-            print(f"      Patcher model: {path}")
-        else:
-            append_startup_event("portable.models.model_b_skipped")
-            print("      Skipped. Chat can run without Model B, but inline fixes will be disabled.")
-
-    return cfg, changed
+    append_startup_event("portable.models.web_ui_selection", model_a_missing=model_a_missing, model_b_missing=model_b_missing)
+    return cfg, False
 
 
 def load_config() -> dict:

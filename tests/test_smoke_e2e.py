@@ -233,7 +233,7 @@ class PortableLauncherSmokeTests(unittest.TestCase):
         mock_dialog.assert_not_called()
         self.assertFalse(changed)
 
-    def test_ensure_models_prompts_dialog_when_model_missing(self):
+    def test_ensure_models_does_not_prompt_dialog_when_model_missing(self):
         model_a = self.tmp_path / "main.gguf"
         model_a.write_text("fake")
 
@@ -243,14 +243,12 @@ class PortableLauncherSmokeTests(unittest.TestCase):
             "model_b_path": "/no/such/file.gguf",
         }
 
-        with patch(
-            "portable_launcher._pick_file_powershell",
-            return_value=str(self.tmp_path / "patcher.gguf"),
-        ):
+        with patch("portable_launcher._pick_file_powershell") as mock_dialog:
             updated_cfg, changed = portable_launcher.ensure_models(cfg)
 
-        self.assertTrue(changed)
-        self.assertEqual(updated_cfg["model_b_path"], str(self.tmp_path / "patcher.gguf"))
+        mock_dialog.assert_not_called()
+        self.assertFalse(changed)
+        self.assertEqual(updated_cfg["model_b_path"], "/no/such/file.gguf")
 
 
 # ─────────────────────────────────────────────────────────────────────────────
