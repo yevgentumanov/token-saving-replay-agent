@@ -1740,10 +1740,25 @@ function renderAttachments(): void {
 }
 
 // Static vision-capability map. Keys are lowercased substrings matched against
-// either provider or full model id. Conservative: unknown → text-only.
+// provider model ids or local GGUF filenames. Conservative: unknown -> text-only.
 function isVisionModel(provider: string, modelId: string): boolean {
   const m = (modelId || "").toLowerCase();
-  if (!provider || provider === "local") return false;
+  const knownVision = [
+    "vision",
+    "gemma-3",
+    "gemma-4",
+    "paligemma",
+    "llava",
+    "moondream",
+    "minicpm-v",
+    "qwen-vl",
+    "qwen2-vl",
+    "qwen2.5-vl",
+    "pixtral",
+    "mllama",
+  ];
+  if (!provider) return false;
+  if (provider === "local") return knownVision.some(key => m.includes(key));
   if (provider === "openai") {
     return m.includes("gpt-4o") || m.includes("gpt-4-turbo")
         || m.includes("gpt-4-vision") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4");
@@ -1760,7 +1775,7 @@ function isVisionModel(provider: string, modelId: string): boolean {
 }
 
 function activeModelAId(): string {
-  if (providerA.value === "local") return "local";
+  if (providerA.value === "local") return pathA.value.trim();
   return cloudModelSelectA.value === "__custom__" ? customModelA.value.trim() : cloudModelSelectA.value;
 }
 

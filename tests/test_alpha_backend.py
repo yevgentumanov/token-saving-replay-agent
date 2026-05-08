@@ -259,6 +259,13 @@ class StaticAlphaTests(unittest.TestCase):
         self.assertIn("exec ./start.sh", Path("start.command").read_text(encoding="utf-8"))
         self.assertIn("CFBundleExecutable", Path("Token Saving Replay Agent.app/Contents/Info.plist").read_text(encoding="utf-8"))
 
+    def test_local_gemma_vision_model_names_are_not_marked_text_only(self):
+        app_ts = Path("static/app.ts").read_text(encoding="utf-8")
+
+        self.assertIn('if (providerA.value === "local") return pathA.value.trim();', app_ts)
+        self.assertIn('"gemma-4"', app_ts)
+        self.assertIn('"gemma-3"', app_ts)
+
 
 class BootstrapTests(unittest.TestCase):
     def test_requirements_hash_is_stable_length(self):
