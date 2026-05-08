@@ -491,7 +491,8 @@ def launch_app():
     cmd = [sys.executable, str(BASE_DIR / "main.py")]
     append_startup_event("portable.main.spawn.start", command=cmd, cwd=str(BASE_DIR), pid=os.getpid())
     log_event(logger, "portable.main.spawn.start", command=cmd, cwd=str(BASE_DIR), pid=os.getpid())
-    proc = subprocess.Popen(cmd)
+    child_env = {**os.environ, "LLAMA_NO_BROWSER": "1"}
+    proc = subprocess.Popen(cmd, env=child_env)
     append_startup_event("portable.main.spawn.done", child_pid=proc.pid)
     log_event(logger, "portable.main.spawn.done", child_pid=proc.pid)
 

@@ -250,6 +250,22 @@ class PortableLauncherSmokeTests(unittest.TestCase):
         self.assertFalse(changed)
         self.assertEqual(updated_cfg["model_b_path"], "/no/such/file.gguf")
 
+    def test_launch_app_suppresses_child_browser_open(self):
+        proc = MagicMock()
+        proc.pid = 123
+        proc.wait.side_effect = [KeyboardInterrupt(), None]
+
+        with (
+            patch("portable_launcher.subprocess.Popen", return_value=proc) as mock_popen,
+            patch("portable_launcher.webbrowser.open") as mock_open,
+            patch("portable_launcher.time.sleep"),
+        ):
+            portable_launcher.launch_app()
+
+        env = mock_popen.call_args.kwargs["env"]
+        self.assertEqual(env["LLAMA_NO_BROWSER"], "1")
+        mock_open.assert_called_once_with(portable_launcher.APP_URL)
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Level 2 — real server subprocess smoke test

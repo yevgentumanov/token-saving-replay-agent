@@ -766,6 +766,8 @@ async def log_http_requests(request: Request, call_next):
         status_code=response.status_code,
         elapsed_ms=elapsed_ms,
     )
+    if request.url.path == "/" or request.url.path == "/static/app.js":
+        response.headers["Cache-Control"] = "no-store, max-age=0"
     return response
 
 # Allow VS Code webview panels (vscode-webview://*) and local browser dev

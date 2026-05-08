@@ -139,6 +139,14 @@ class BackendAlphaTests(unittest.TestCase):
         self.assertIn("next_step", payload)
         self.assertNotIn("api_key", response.text.lower())
 
+    def test_app_shell_and_app_js_are_not_browser_cached(self):
+        client = TestClient(main.app)
+        index_response = client.get("/")
+        app_js_response = client.get("/static/app.js")
+
+        self.assertEqual(index_response.headers.get("cache-control"), "no-store, max-age=0")
+        self.assertEqual(app_js_response.headers.get("cache-control"), "no-store, max-age=0")
+
     def test_config_endpoint_clears_stale_llama_path(self):
         with tempfile.TemporaryDirectory() as tmp:
             original_config = main.CONFIG_FILE
@@ -316,6 +324,7 @@ class StaticAlphaTests(unittest.TestCase):
         self.assertIn("profileDetect", html)
         self.assertIn("profileApplyDetect", html)
         self.assertIn("profileDetectPanel", html)
+        self.assertIn("/static/app.js?v=", html)
 
     def test_vendor_assets_exist(self):
         self.assertTrue(Path("static/vendor/marked.min.js").exists())
