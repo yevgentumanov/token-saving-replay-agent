@@ -1062,6 +1062,77 @@ async def ws_logs(ws: WebSocket):
         log_error(logger, "ws.logs.error", exc)
 
 
+PREFLIGHT_HOST = "127.0.0.1"
+PREFLIGHT_PORT = 7860
+
+
+def _preflight_port_check(host: str = PREFLIGHT_HOST, port: int = PREFLIGHT_PORT) -> Optional[str]:
+    """
+    Decide what to do before binding uvicorn to (host, port).
+
+    Returns:
+      "ours"    — our own app is already running; caller should open browser & exit 0.
+      "foreign" — port is held by something else; caller should print help & exit 1.
+      None      — port is free; caller should start uvicorn normally.
+    """
+    import socket
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.settimeout(0.4)
+    try:
+        s.connect((host, port))
+    except (ConnectionRefusedError, OSError):
+        return None
+    finally:
+        try: s.close()
+        except OSError: pass
+
+    # Something is listening — fingerprint via /api/status.
+    try:
+        r = httpx.get(f"http://{host}:{port}/api/status", timeout=1.5)
+        if r.status_code == 200:
+            data = r.json()
+            if isinstance(data, dict) and "a" in data and "b" in data \
+                    and isinstance(data.get("a"), dict) and "running" in data["a"]:
+                return "ours"
+    except Exception:
+        pass
+    return "foreign"
+
+
 if __name__ == "__main__":
-    log_event(logger, "app.run", host="127.0.0.1", port=7860)
-    uvicorn.run(app, host="127.0.0.1", port=7860, log_level="warning")
+    with open(BASE_DIR / "_preflight_debug.log", "a", encoding="utf-8") as _f:
+        _f.write(f"\n--- main.py launched, pid={os.getpid()}, time={time.time()} ---\n")
+    log_event(logger, "app.run", host=PREFLIGHT_HOST, port=PREFLIGHT_PORT)
+    verdict = _preflight_port_check()
+    with open(BASE_DIR / "_preflight_debug.log", "a", encoding="utf-8") as _f:
+        _f.write(f"verdict={verdict!r}\n")
+    if verdict == "ours":
+        url = f"http://localhost:{PREFLIGHT_PORT}"
+        print(f"Token Saving Replay Agent is already running at {url} — opening it in your browser.")
+        log_event(logger, "app.preflight.already_running", url=url)
+        if not os.environ.get("LLAMA_NO_BROWSER"):
+            try: webbrowser.open(url)
+            except Exception as exc:
+                log_warning(logger, "app.preflight.browser_open_failed", error=str(exc))
+        sys.exit(0)
+    if verdict == "foreign":
+        print(
+            f"\nPort {PREFLIGHT_PORT} is already in use by another process.\n"
+            f"  Close that process or free the port, then re-run this launcher.\n"
+            f"  To find the holder on Windows:  netstat -ano | findstr :{PREFLIGHT_PORT}\n"
+        )
+        log_warning(logger, "app.preflight.port_in_use_foreign", port=PREFLIGHT_PORT)
+        sys.exit(1)
+
+    try:
+        uvicorn.run(app, host=PREFLIGHT_HOST, port=PREFLIGHT_PORT, log_level="warning")
+    except OSError as exc:
+        # Race: port got taken between the probe and the bind, or some other bind error.
+        if exc.errno == errno.EADDRINUSE or "10048" in str(exc):
+            print(
+                f"\nPort {PREFLIGHT_PORT} became unavailable just before startup.\n"
+                f"  Wait a moment and try again, or run:  netstat -ano | findstr :{PREFLIGHT_PORT}\n"
+            )
+            log_warning(logger, "app.run.bind_failed_race", port=PREFLIGHT_PORT, error=str(exc))
+            sys.exit(1)
+        raise
