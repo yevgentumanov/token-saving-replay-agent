@@ -150,11 +150,24 @@ class BackendAlphaTests(unittest.TestCase):
         self.assertNotIn("*.exe", [pattern for _, pattern in main._binary_filetypes("Darwin")])
 
     def test_file_dialog_reports_missing_tkinter_cleanly(self):
-        with patch.dict("sys.modules", {"tkinter": None}):
+        with patch.dict("sys.modules", {"tkinter": None}), patch("main.platform.system", return_value="Darwin"):
             response = TestClient(main.app).get("/api/open-file-dialog?type=model")
 
         self.assertEqual(response.status_code, 501)
         self.assertIn("Paste the file path manually", response.json()["detail"])
+
+    def test_file_dialog_uses_windows_fallback_without_tkinter(self):
+        completed = Mock(returncode=0, stdout="C:\\Models\\model.gguf\n", stderr="")
+        with (
+            patch.dict("sys.modules", {"tkinter": None}),
+            patch("main.platform.system", return_value="Windows"),
+            patch("main.shutil.which", return_value="powershell.exe"),
+            patch("main.subprocess.run", return_value=completed),
+        ):
+            response = TestClient(main.app).get("/api/open-file-dialog?type=model")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["path"], "C:\\Models\\model.gguf")
 
     def test_resolve_llama_server_ignores_stale_windows_path(self):
         stale = str(Path(tempfile.gettempdir()) / "missing-token-saving-replay-agent" / "llama-server.exe")

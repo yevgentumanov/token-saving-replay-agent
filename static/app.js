@@ -356,7 +356,7 @@ async function browseFile(type, target, logMsg) {
     }
     catch (e) {
         const msg = e instanceof Error ? e.message : String(e);
-        clientLog("error", "launcher.file_dialog.failed", msg, { type });
+        clientLog("warn", "launcher.file_dialog.failed", msg, { type });
         addLog("File dialog unavailable: " + msg, "log-error");
     }
 }

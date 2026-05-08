@@ -170,6 +170,43 @@ def _binary_filetypes(system_name: Optional[str] = None) -> list[tuple[str, str]
     return [("llama-server binaries", "llama-server"), ("All files", "*")]
 
 
+def _windows_file_dialog(type: str) -> str:
+    powershell = shutil.which("powershell.exe") or shutil.which("powershell")
+    if not powershell:
+        raise RuntimeError("PowerShell was not found")
+    if type == "binary":
+        title = "Select llama-server executable"
+        file_filter = "Executables (*.exe)|*.exe|All files (*.*)|*.*"
+    else:
+        title = "Select GGUF model"
+        file_filter = "GGUF models (*.gguf)|*.gguf|All files (*.*)|*.*"
+    script = f"""
+Add-Type -AssemblyName System.Windows.Forms
+[Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+$dialog = New-Object System.Windows.Forms.OpenFileDialog
+$dialog.Title = '{title}'
+$dialog.Filter = '{file_filter}'
+$dialog.CheckFileExists = $true
+$dialog.Multiselect = $false
+if ($dialog.ShowDialog() -eq [System.Windows.Forms.DialogResult]::OK) {{
+  Write-Output $dialog.FileName
+}}
+"""
+    result = subprocess.run(
+        [powershell, "-NoProfile", "-STA", "-Command", script],
+        check=False,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
+        timeout=120,
+    )
+    if result.returncode != 0:
+        detail = (result.stderr or result.stdout or "PowerShell file dialog failed").strip()
+        raise RuntimeError(detail)
+    return result.stdout.strip()
+
+
 def _version_from_output(output: str, prefix: str = "") -> str:
     first_line = ""
     for line in output.splitlines():
@@ -866,6 +903,15 @@ async def api_open_file_dialog(type: str = "model"):
     except ModuleNotFoundError as e:
         if e.name != "tkinter":
             raise
+        if platform.system() == "Windows":
+            try:
+                path = _windows_file_dialog(type)
+                log_event(logger, "api.file_dialog.done", type=type, selected=bool(path), provider="powershell")
+                return {"path": path or ""}
+            except Exception as fallback_exc:
+                message = f"Windows file picker failed: {fallback_exc}. Paste the file path manually."
+                log_warning(logger, "api.file_dialog.windows_fallback_failed", type=type, error=str(fallback_exc))
+                raise HTTPException(500, message)
         message = "File picker is unavailable because this Python runtime has no tkinter. Paste the file path manually."
         log_warning(logger, "api.file_dialog.tkinter_missing", type=type)
         raise HTTPException(501, message)

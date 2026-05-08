@@ -439,7 +439,7 @@ async function browseFile(type: string, target: HTMLInputElement, logMsg: string
     clientLog("info", "launcher.file_dialog.done", "", { type, selected: Boolean(data.path) });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    clientLog("error", "launcher.file_dialog.failed", msg, { type });
+    clientLog("warn", "launcher.file_dialog.failed", msg, { type });
     addLog("File dialog unavailable: " + msg, "log-error");
   }
 }
