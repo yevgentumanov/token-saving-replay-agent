@@ -127,8 +127,9 @@ class BackendAlphaTests(unittest.TestCase):
             original_config = main.CONFIG_FILE
             try:
                 cfg_path = Path(tmp) / "config.json"
+                stale = Path(tmp) / "missing" / "llama-server.exe"
                 cfg_path.write_text(
-                    '{"llama_server_path": "C:/Users/Euu/Desktop/Projects/token-saving-replay-agent/bin/llama-server.exe"}',
+                    json.dumps({"llama_server_path": str(stale)}),
                     encoding="utf-8",
                 )
                 main.CONFIG_FILE = cfg_path
@@ -149,7 +150,7 @@ class BackendAlphaTests(unittest.TestCase):
         self.assertNotIn("*.exe", [pattern for _, pattern in main._binary_filetypes("Darwin")])
 
     def test_resolve_llama_server_ignores_stale_windows_path(self):
-        stale = "C:/Users/Euu/Desktop/Projects/token-saving-replay-agent/bin/llama-server.exe"
+        stale = str(Path(tempfile.gettempdir()) / "missing-token-saving-replay-agent" / "llama-server.exe")
         with patch("main.find_llama_server", return_value="llama-server"):
             self.assertEqual(main.resolve_llama_server_path(stale), "")
 
