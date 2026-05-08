@@ -147,6 +147,7 @@ Browser http://localhost:7860
   FastAPI main.py
     /api/start          starts local llama-server processes or cloud clients
     /api/status         reports Model A/B health
+    /api/model/capabilities detects text/image/audio support from provider, GGUF metadata, and projector hints
     /api/chat/main      streams Model A responses
     /api/chat/patcher   one-shot Model B patcher calls
     /api/consolidation  summarizes applied patches

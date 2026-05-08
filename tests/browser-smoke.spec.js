@@ -88,3 +88,56 @@ test("fresh macOS browser profile defaults to zsh", async ({ page }) => {
   await expect(page.locator("#prof-os")).toHaveValue("macOS");
   await expect(page.locator("#prof-shell")).toHaveValue("zsh");
 });
+
+test("image attachment warning uses backend model capabilities", async ({ page }) => {
+  await page.route("**/api/model/capabilities**", async route => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        provider: "local",
+        model: "gemma-4-E4B-it-UD-Q4_K_XL.gguf",
+        capabilities: ["text", "image"],
+        confidence: "medium",
+        source: "filename",
+        warnings: ["Vision-like model detected, but no --mmproj argument or sibling mmproj file found."],
+        metadata: {},
+      }),
+    });
+  });
+
+  await page.goto("http://127.0.0.1:7860/");
+  await page.locator("#chatFileInput").setInputFiles({
+    name: "sample.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("fake image"),
+  });
+
+  await expect(page.locator("#attachmentWarning")).toContainText("Vision-like model detected");
+  await expect(page.locator("#attachmentWarning")).not.toContainText("image support is not confirmed");
+});
+
+test("text-only capability skips image attachments", async ({ page }) => {
+  await page.route("**/api/model/capabilities**", async route => {
+    await route.fulfill({
+      contentType: "application/json",
+      body: JSON.stringify({
+        provider: "local",
+        model: "qwen3-14b-q4.gguf",
+        capabilities: ["text"],
+        confidence: "low",
+        source: "unknown",
+        warnings: ["Could not confirm image/audio support for this local model."],
+        metadata: {},
+      }),
+    });
+  });
+
+  await page.goto("http://127.0.0.1:7860/");
+  await page.locator("#chatFileInput").setInputFiles({
+    name: "sample.png",
+    mimeType: "image/png",
+    buffer: Buffer.from("fake image"),
+  });
+
+  await expect(page.locator("#attachmentWarning")).toContainText("image support is not confirmed");
+});

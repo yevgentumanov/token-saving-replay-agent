@@ -1565,7 +1565,17 @@ const TEXT_EXT = new Set([
     "java", "kt", "kts", "go", "rs", "rb", "php", "c", "h", "cpp", "hpp", "cs", "swift", "sh",
     "ps1", "psm1", "bat", "cmd", "sql", "xml", "env", "gitignore", "dockerfile", "makefile",
 ]);
+const DEFAULT_MODEL_CAPABILITIES = {
+    provider: "local",
+    model: "",
+    capabilities: ["text"],
+    confidence: "low",
+    source: "unknown",
+    warnings: ["Model capabilities have not been checked yet."],
+};
 let pendingAttachments = [];
+let modelACapabilities = DEFAULT_MODEL_CAPABILITIES;
+let modelCapabilityRequestId = 0;
 function formatBytes(n) {
     if (n < 1024)
         return `${n} B`;
@@ -1650,44 +1660,58 @@ function renderAttachments() {
 }
 // Static vision-capability map. Keys are lowercased substrings matched against
 // provider model ids or local GGUF filenames. Conservative: unknown -> text-only.
-function isVisionModel(provider, modelId) {
-    const m = (modelId || "").toLowerCase();
-    const knownVision = [
-        "vision",
-        "gemma-3",
-        "gemma-4",
-        "paligemma",
-        "llava",
-        "moondream",
-        "minicpm-v",
-        "qwen-vl",
-        "qwen2-vl",
-        "qwen2.5-vl",
-        "pixtral",
-        "mllama",
-    ];
-    if (!provider)
-        return false;
-    if (provider === "local")
-        return knownVision.some(key => m.includes(key));
-    if (provider === "openai") {
-        return m.includes("gpt-4o") || m.includes("gpt-4-turbo")
-            || m.includes("gpt-4-vision") || m.startsWith("o1") || m.startsWith("o3") || m.startsWith("o4");
-    }
-    if (provider === "anthropic") {
-        // All current Claude 3+ family models accept images.
-        return m.includes("claude-3") || m.includes("claude-sonnet")
-            || m.includes("claude-opus") || m.includes("claude-haiku");
-    }
-    if (provider === "groq") {
-        return m.includes("vision") || m.includes("llama-4");
-    }
-    return false;
-}
 function activeModelAId() {
     if (providerA.value === "local")
         return pathA.value.trim();
     return cloudModelSelectA.value === "__custom__" ? customModelA.value.trim() : cloudModelSelectA.value;
+}
+function modelAArgsForCapabilities() {
+    return providerA.value === "local" ? buildArgs("a") : "";
+}
+function modelAHasCapability(capability) {
+    return modelACapabilities.capabilities.includes(capability);
+}
+async function refreshModelCapabilities() {
+    const requestId = ++modelCapabilityRequestId;
+    const params = new URLSearchParams({
+        provider: providerA.value,
+        model_path: providerA.value === "local" ? pathA.value.trim() : "",
+        cloud_model: providerA.value === "local" ? "" : activeModelAId(),
+        args: modelAArgsForCapabilities(),
+    });
+    try {
+        const r = await fetch(`/api/model/capabilities?${params.toString()}`);
+        const data = await r.json();
+        if (!r.ok)
+            throw new Error(data.detail || `HTTP ${r.status}`);
+        if (requestId === modelCapabilityRequestId) {
+            modelACapabilities = data;
+            updateAttachmentWarning();
+        }
+        clientLog("info", "model.capabilities.loaded", "", {
+            provider: data.provider,
+            source: data.source,
+            confidence: data.confidence,
+            capabilities: data.capabilities,
+            warnings: data.warnings.length,
+        });
+        return data;
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        const fallback = {
+            ...DEFAULT_MODEL_CAPABILITIES,
+            provider: providerA.value,
+            model: activeModelAId(),
+            warnings: [`Model capability check failed: ${msg}`],
+        };
+        if (requestId === modelCapabilityRequestId) {
+            modelACapabilities = fallback;
+            updateAttachmentWarning();
+        }
+        clientLog("warn", "model.capabilities.failed", msg);
+        return fallback;
+    }
 }
 function updateAttachmentWarning() {
     const hasImage = pendingAttachments.some(a => a.kind === "image");
@@ -1696,8 +1720,13 @@ function updateAttachmentWarning() {
         attachmentWarn.textContent = "";
         return;
     }
-    if (!isVisionModel(providerA.value, activeModelAId())) {
-        attachmentWarn.textContent = "Current model is text-only — images will be skipped on send.";
+    if (!modelAHasCapability("image")) {
+        const detail = modelACapabilities.warnings[0] || "Could not confirm vision support. Check --mmproj or use a Hugging Face multimodal launch.";
+        attachmentWarn.textContent = `Current model image support is not confirmed - images will be skipped on send. ${detail}`;
+        attachmentWarn.classList.add("show");
+    }
+    else if (modelACapabilities.warnings.length > 0) {
+        attachmentWarn.textContent = modelACapabilities.warnings[0];
         attachmentWarn.classList.add("show");
     }
     else {
@@ -1748,6 +1777,13 @@ chatFileInput.addEventListener("change", async () => {
 providerA.addEventListener("change", updateAttachmentWarning);
 cloudModelSelectA.addEventListener("change", updateAttachmentWarning);
 customModelA.addEventListener("input", updateAttachmentWarning);
+[
+    pathA, providerA, cloudModelSelectA, customModelA,
+    $("computeA"), $("ctxA"), $("threadsA"), $("flashAttnA"), $("noMmapA"),
+].forEach(el => {
+    el.addEventListener("change", () => { void refreshModelCapabilities(); });
+    el.addEventListener("input", () => { void refreshModelCapabilities(); });
+});
 // Drag-and-drop onto the chat input area
 chatInput.addEventListener("dragover", (e) => { e.preventDefault(); });
 chatInput.addEventListener("drop", async (e) => {
@@ -1770,7 +1806,8 @@ async function sendMessage() {
     // Snapshot attachments and clear input *before* assembling the message.
     const attachments = pendingAttachments.slice();
     pendingAttachments = [];
-    const visionOk = isVisionModel(providerA.value, activeModelAId());
+    const capabilities = await refreshModelCapabilities();
+    const visionOk = capabilities.capabilities.includes("image");
     const textAtt = attachments.filter(a => a.kind === "text");
     const imageAtt = attachments.filter(a => a.kind === "image");
     const skippedImages = visionOk ? [] : imageAtt;
@@ -1783,7 +1820,7 @@ async function sendMessage() {
     }
     if (skippedImages.length > 0) {
         const names = skippedImages.map(a => a.name).join(", ");
-        textBlocks.push(`(Skipped ${skippedImages.length} image attachment(s) — current model is text-only: ${names})`);
+        textBlocks.push(`(Skipped ${skippedImages.length} image attachment(s) - image support was not confirmed: ${names})`);
     }
     const composedText = [...textBlocks, text].filter(Boolean).join("\n\n");
     // For models that accept images, send a content array; otherwise plain string.
@@ -1971,7 +2008,7 @@ newChatBtn.addEventListener("click", () => {
 // ========================================================================
 clientLog("info", "frontend.init.start");
 loadLauncherSettings();
-loadConfigFallback();
+loadConfigFallback().then(() => refreshModelCapabilities());
 loadSetupStatus();
 syncPatcherBlock();
 hydrateProfileForm();
@@ -1982,6 +2019,7 @@ pollStatus();
 setInterval(pollStatus, 3000);
 handleProviderChange("A");
 handleProviderChange("B");
+void refreshModelCapabilities();
 // Persist Consolidation Pass toggle state across sessions
 if (consolidationEnabledToggle) {
     const saved = localStorage.getItem("consolidationEnabled");

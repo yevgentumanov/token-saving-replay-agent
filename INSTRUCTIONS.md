@@ -246,6 +246,7 @@ All routes are served by the FastAPI backend at `http://localhost:7860`.
 | POST | `/api/stop` | Stop all model processes |
 | GET | `/api/status` | Health of both models (`a`/`b` keys) |
 | GET | `/api/config` | Current config (no API keys) |
+| GET | `/api/model/capabilities` | Detect text/image/audio support for local GGUF or cloud model |
 | GET | `/api/setup/status` | Setup readiness for Cloud and Local GGUF mode |
 | GET | `/api/diagnostics` | Safe diagnostics JSON for bug reports |
 | POST | `/api/chat/main` | SSE stream from Model A |

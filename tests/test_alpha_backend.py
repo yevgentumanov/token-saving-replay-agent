@@ -1,5 +1,6 @@
 import asyncio
 import json
+import struct
 import subprocess
 import tempfile
 import unittest
@@ -13,6 +14,22 @@ import bootstrap
 import main
 from consolidation import PatchRecord
 from llm_clients import BaseLLMClient
+
+
+def write_minimal_gguf(path: Path, metadata: dict[str, str]):
+    with path.open("wb") as f:
+        f.write(b"GGUF")
+        f.write(struct.pack("<I", 3))
+        f.write(struct.pack("<Q", 0))
+        f.write(struct.pack("<Q", len(metadata)))
+        for key, value in metadata.items():
+            key_bytes = key.encode("utf-8")
+            value_bytes = value.encode("utf-8")
+            f.write(struct.pack("<Q", len(key_bytes)))
+            f.write(key_bytes)
+            f.write(struct.pack("<I", 8))
+            f.write(struct.pack("<Q", len(value_bytes)))
+            f.write(value_bytes)
 
 
 class BackendAlphaTests(unittest.TestCase):
@@ -75,7 +92,7 @@ class BackendAlphaTests(unittest.TestCase):
 
     def test_core_endpoints_respond_without_models(self):
         client = TestClient(main.app)
-        for path in ["/api/status", "/api/config", "/api/setup/status", "/api/consolidation/config", "/api/diagnostics", "/api/environment/detect"]:
+        for path in ["/api/status", "/api/config", "/api/model/capabilities", "/api/setup/status", "/api/consolidation/config", "/api/diagnostics", "/api/environment/detect"]:
             with self.subTest(path=path):
                 response = client.get(path)
                 self.assertEqual(response.status_code, 200)
@@ -181,6 +198,60 @@ class BackendAlphaTests(unittest.TestCase):
             with patch("main.find_llama_server", return_value=""):
                 self.assertEqual(main.resolve_llama_server_path(str(candidate)), str(candidate))
 
+    def test_model_capabilities_detects_gemma4_from_filename_with_warning(self):
+        result = main.detect_model_capabilities(
+            "local",
+            model_path="C:/Models/gemma-4-E4B-it-UD-Q4_K_XL.gguf",
+            args="-c 32768",
+        )
+
+        self.assertIn("image", result["capabilities"])
+        self.assertEqual(result["confidence"], "medium")
+        self.assertEqual(result["source"], "filename")
+        self.assertTrue(any("mmproj" in warning for warning in result["warnings"]))
+
+    def test_model_capabilities_detects_qwen_vl_and_plain_qwen(self):
+        qwen_vl = main.detect_model_capabilities("local", model_path="qwen2.5-vl-7b-q4.gguf")
+        qwen_text = main.detect_model_capabilities("local", model_path="qwen3-14b-q4.gguf")
+
+        self.assertIn("image", qwen_vl["capabilities"])
+        self.assertNotIn("image", qwen_text["capabilities"])
+
+    def test_model_capabilities_projector_signals_raise_confidence(self):
+        by_arg = main.detect_model_capabilities("local", model_path="gemma-4-E4B-it.gguf", args="--mmproj C:/Models/mmproj.gguf")
+        self.assertEqual(by_arg["confidence"], "high")
+        self.assertEqual(by_arg["source"], "mmproj_arg")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "gemma-4-E4B-it.gguf"
+            projector = Path(tmp) / "mmproj-gemma-4-E4B-it.gguf"
+            model.write_text("fake", encoding="utf-8")
+            projector.write_text("fake", encoding="utf-8")
+
+            by_sibling = main.detect_model_capabilities("local", model_path=str(model))
+
+        self.assertEqual(by_sibling["confidence"], "high")
+        self.assertEqual(by_sibling["source"], "sibling_mmproj")
+        self.assertFalse(any("no --mmproj" in warning for warning in by_sibling["warnings"]))
+
+    def test_model_capabilities_reads_gguf_metadata_without_tensor_data(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            model = Path(tmp) / "plain-name.gguf"
+            write_minimal_gguf(model, {"general.name": "Gemma 4 E4B IT"})
+
+            result = main.detect_model_capabilities("local", model_path=str(model))
+
+        self.assertIn("image", result["capabilities"])
+        self.assertEqual(result["source"], "gguf_metadata")
+
+    def test_model_capabilities_endpoint_cloud_map(self):
+        response = TestClient(main.app).get("/api/model/capabilities?provider=openai&cloud_model=gpt-4o")
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("image", payload["capabilities"])
+        self.assertEqual(payload["source"], "cloud_map")
+
 
 class ConsolidationAlphaTests(unittest.TestCase):
     def test_threshold_modes(self):
@@ -259,12 +330,12 @@ class StaticAlphaTests(unittest.TestCase):
         self.assertIn("exec ./start.sh", Path("start.command").read_text(encoding="utf-8"))
         self.assertIn("CFBundleExecutable", Path("Token Saving Replay Agent.app/Contents/Info.plist").read_text(encoding="utf-8"))
 
-    def test_local_gemma_vision_model_names_are_not_marked_text_only(self):
+    def test_frontend_uses_backend_model_capabilities(self):
         app_ts = Path("static/app.ts").read_text(encoding="utf-8")
 
-        self.assertIn('if (providerA.value === "local") return pathA.value.trim();', app_ts)
-        self.assertIn('"gemma-4"', app_ts)
-        self.assertIn('"gemma-3"', app_ts)
+        self.assertIn("/api/model/capabilities", app_ts)
+        self.assertIn("refreshModelCapabilities", app_ts)
+        self.assertNotIn("function isVisionModel", app_ts)
 
 
 class BootstrapTests(unittest.TestCase):
@@ -347,6 +418,7 @@ class SmokeTests(unittest.TestCase):
         endpoints = [
             "/api/status",
             "/api/config",
+            "/api/model/capabilities",
             "/api/setup/status",
             "/api/diagnostics",
             "/api/environment/detect",

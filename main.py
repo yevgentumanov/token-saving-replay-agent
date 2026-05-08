@@ -11,6 +11,7 @@ import shlex
 import shutil
 import signal
 import subprocess
+import struct
 import sys
 import threading
 import time
@@ -168,6 +169,247 @@ def _binary_filetypes(system_name: Optional[str] = None) -> list[tuple[str, str]
     if (system_name or platform.system()) == "Windows":
         return [("Executables", "*.exe"), ("All files", "*.*")]
     return [("llama-server binaries", "llama-server"), ("All files", "*")]
+
+
+GGUF_VALUE_TYPES = {
+    0: "uint8",
+    1: "int8",
+    2: "uint16",
+    3: "int16",
+    4: "uint32",
+    5: "int32",
+    6: "float32",
+    7: "bool",
+    8: "string",
+    9: "array",
+    10: "uint64",
+    11: "int64",
+    12: "float64",
+}
+GGUF_SCALAR_FORMATS = {
+    0: "B",
+    1: "b",
+    2: "H",
+    3: "h",
+    4: "I",
+    5: "i",
+    6: "f",
+    7: "?",
+    10: "Q",
+    11: "q",
+    12: "d",
+}
+GGUF_METADATA_KEYS = {
+    "general.architecture",
+    "general.name",
+    "general.basename",
+    "general.finetune",
+    "general.tags",
+    "tokenizer.chat_template",
+}
+VISION_MODEL_HINTS = [
+    "vision",
+    "gemma-3",
+    "gemma-4",
+    "paligemma",
+    "llava",
+    "moondream",
+    "minicpm-v",
+    "qwen-vl",
+    "qwen2-vl",
+    "qwen2.5-vl",
+    "smolvlm",
+    "pixtral",
+    "internvl",
+    "mllama",
+    "llama-4",
+]
+AUDIO_MODEL_HINTS = ["ultravox", "voxtral", "audio", "speech"]
+OMNI_MODEL_HINTS = ["qwen2.5-omni", "qwen-omni", "omni"]
+
+
+def _read_exact(f, size: int) -> bytes:
+    data = f.read(size)
+    if len(data) != size:
+        raise EOFError("Unexpected end of GGUF metadata")
+    return data
+
+
+def _read_u32(f) -> int:
+    return struct.unpack("<I", _read_exact(f, 4))[0]
+
+
+def _read_u64(f) -> int:
+    return struct.unpack("<Q", _read_exact(f, 8))[0]
+
+
+def _read_gguf_string(f, max_len: int = 1024 * 1024) -> str:
+    length = _read_u64(f)
+    if length > max_len:
+        raise ValueError(f"GGUF string too large: {length}")
+    return _read_exact(f, length).decode("utf-8", errors="replace")
+
+
+def _read_gguf_value(f, value_type: int, keep_value: bool):
+    if value_type == 8:
+        value = _read_gguf_string(f)
+        return value if keep_value else None
+    if value_type == 9:
+        item_type = _read_u32(f)
+        length = _read_u64(f)
+        values = []
+        keep_items = keep_value and length <= 64
+        for _ in range(length):
+            item = _read_gguf_value(f, item_type, keep_items)
+            if keep_items:
+                values.append(item)
+        return values if keep_items else None
+    fmt = GGUF_SCALAR_FORMATS.get(value_type)
+    if not fmt:
+        raise ValueError(f"Unsupported GGUF metadata type: {value_type}")
+    size = struct.calcsize("<" + fmt)
+    value = struct.unpack("<" + fmt, _read_exact(f, size))[0]
+    return value if keep_value else None
+
+
+def read_gguf_metadata(path: str, wanted_keys: Optional[set[str]] = None) -> dict:
+    wanted = wanted_keys or GGUF_METADATA_KEYS
+    metadata = {}
+    model_path = Path(path)
+    with model_path.open("rb") as f:
+        if _read_exact(f, 4) != b"GGUF":
+            return metadata
+        version = _read_u32(f)
+        if version < 2:
+            return metadata
+        _read_u64(f)  # tensor count
+        kv_count = _read_u64(f)
+        for _ in range(kv_count):
+            key = _read_gguf_string(f, max_len=16 * 1024)
+            value_type = _read_u32(f)
+            keep_value = key in wanted
+            value = _read_gguf_value(f, value_type, keep_value)
+            if keep_value:
+                metadata[key] = value
+    return metadata
+
+
+def _metadata_text(metadata: dict) -> str:
+    parts = []
+    for value in metadata.values():
+        if isinstance(value, list):
+            parts.extend(str(item) for item in value)
+        elif value is not None:
+            parts.append(str(value))
+    return " ".join(parts).lower()
+
+
+def _has_any_hint(text: str, hints: list[str]) -> bool:
+    lowered = text.lower()
+    normalized = re.sub(r"[^a-z0-9]+", "-", lowered).strip("-")
+    return any(hint in lowered or hint in normalized for hint in hints)
+
+
+def _args_include_mmproj(args: str) -> bool:
+    raw = (args or "").strip()
+    if not raw:
+        return False
+    if re.search(r"(^|\s)--mmproj(=|\s+)", raw):
+        return True
+    try:
+        parts = shlex.split(raw, posix=False)
+    except ValueError:
+        parts = raw.split()
+    return any(part == "--mmproj" or part.startswith("--mmproj=") for part in parts)
+
+
+def _has_sibling_mmproj(model_path: str) -> bool:
+    path = Path(model_path or "")
+    if not path.exists() or not path.parent.exists():
+        return False
+    patterns = ["mmproj*.gguf", "*mmproj*.gguf", "projector*.gguf"]
+    for pattern in patterns:
+        if any(candidate.is_file() for candidate in path.parent.glob(pattern)):
+            return True
+    return False
+
+
+def detect_model_capabilities(provider: str, model_path: str = "", cloud_model: str = "", args: str = "") -> dict:
+    provider_name = (provider or "local").lower()
+    identifier = cloud_model if provider_name != "local" else model_path
+    text = (identifier or "").lower()
+    metadata = {}
+    source = "unknown"
+    confidence = "low"
+    capabilities = {"text"}
+    warnings: list[str] = []
+
+    if provider_name == "local":
+        try:
+            if model_path and Path(model_path).is_file() and Path(model_path).suffix.lower() == ".gguf":
+                metadata = read_gguf_metadata(model_path)
+                meta_text = _metadata_text(metadata)
+                if meta_text:
+                    text = f"{text} {meta_text}"
+                    source = "gguf_metadata"
+        except Exception as exc:
+            warnings.append(f"Could not read GGUF metadata: {exc}")
+            log_warning(logger, "model.capabilities.gguf_metadata_failed", error=str(exc))
+
+        has_vision_hint = _has_any_hint(text, VISION_MODEL_HINTS)
+        has_audio_hint = _has_any_hint(text, AUDIO_MODEL_HINTS)
+        has_omni_hint = _has_any_hint(text, OMNI_MODEL_HINTS)
+        has_mmproj_arg = _args_include_mmproj(args)
+        has_sibling_mmproj = _has_sibling_mmproj(model_path)
+
+        if has_omni_hint:
+            capabilities.update({"image", "audio"})
+        else:
+            if has_vision_hint:
+                capabilities.add("image")
+            if has_audio_hint:
+                capabilities.add("audio")
+
+        if has_mmproj_arg:
+            source = "mmproj_arg"
+            confidence = "high"
+        elif has_sibling_mmproj:
+            source = "sibling_mmproj"
+            confidence = "high"
+        elif "image" in capabilities or "audio" in capabilities:
+            confidence = "medium"
+            if source == "unknown":
+                source = "filename"
+            if "image" in capabilities:
+                warnings.append("Vision-like model detected, but no --mmproj argument or sibling mmproj file found.")
+        else:
+            warnings.append("Could not confirm image/audio support for this local model.")
+    else:
+        source = "cloud_map"
+        if provider_name == "openai":
+            if "gpt-4o" in text or "gpt-4-turbo" in text or "gpt-4-vision" in text or re.match(r"^o[134]", text):
+                capabilities.add("image")
+                confidence = "high"
+        elif provider_name == "anthropic":
+            if any(key in text for key in ["claude-3", "claude-sonnet", "claude-opus", "claude-haiku"]):
+                capabilities.add("image")
+                confidence = "high"
+        elif provider_name == "groq":
+            if "vision" in text or "llama-4" in text:
+                capabilities.add("image")
+                confidence = "high"
+        if confidence == "low":
+            warnings.append("Could not confirm image/audio support for this cloud model.")
+
+    return {
+        "provider": provider_name,
+        "model": identifier or "",
+        "capabilities": sorted(capabilities),
+        "confidence": confidence,
+        "source": source,
+        "warnings": warnings,
+        "metadata": {key: metadata[key] for key in sorted(metadata.keys())} if metadata else {},
+    }
 
 
 def _windows_file_dialog(type: str) -> str:
@@ -764,6 +1006,26 @@ async def api_get_config():
     cfg["llama_server_path"] = resolve_llama_server_path(cfg.get("llama_server_path", ""))
     log_event(logger, "api.config", llama_server_path=cfg.get("llama_server_path", ""))
     return cfg
+
+
+@app.get("/api/model/capabilities")
+async def api_model_capabilities(
+    provider: str = "local",
+    model_path: str = "",
+    cloud_model: str = "",
+    args: str = "",
+):
+    result = detect_model_capabilities(provider, model_path=model_path, cloud_model=cloud_model, args=args)
+    log_event(
+        logger,
+        "api.model_capabilities",
+        provider=result["provider"],
+        source=result["source"],
+        confidence=result["confidence"],
+        capabilities=result["capabilities"],
+        warning_count=len(result["warnings"]),
+    )
+    return result
 
 
 @app.get("/api/setup/status")
