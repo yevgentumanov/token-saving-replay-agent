@@ -5,6 +5,10 @@ function messageText(m) {
         return m.content;
     return m.content.filter(p => p.type === "text").map(p => p.text).join("\n");
 }
+function backendUnreachableMessage(e) {
+    const detail = e instanceof Error ? e.message : String(e);
+    return `Backend server is not reachable (${detail}). Relaunch Token Saving Replay Agent.app or run ./start.sh, then reload this page.`;
+}
 // ===== Helpers =====
 const $ = (id) => document.getElementById(id);
 // Detect VS Code webview iframe mode (chatPanel.ts passes ?vscode=1 in the iframe URL)
@@ -32,6 +36,7 @@ const consoleDiv = $("console");
 const diagnosticsBtn = $("diagnosticsBtn");
 const copyDiagnosticsBtn = $("copyDiagnosticsBtn");
 const diagnosticsPanel = $("diagnosticsPanel");
+const setupPanel = $("setupPanel");
 // Cloud / provider elements - Model A
 const providerA = $("providerA");
 const localFieldsA = $("localFieldsA");
@@ -128,8 +133,8 @@ async function loadConfigFallback() {
             pathB.value = c.model_b_path;
         if (c.model_b_port)
             portB.value = String(c.model_b_port);
-        if (c.llama_server_path) {
-            llamaPath.value = c.llama_server_path;
+        if ("llama_server_path" in c) {
+            llamaPath.value = c.llama_server_path || "";
             localStorage.setItem("llamaPath", c.llama_server_path);
         }
         if (c.host)
@@ -154,6 +159,35 @@ async function loadConfigFallback() {
     }
     catch (e) {
         clientLog("warn", "launcher.config.load.failed", stringifyLogArg(e));
+    }
+}
+async function loadSetupStatus() {
+    try {
+        const r = await fetch("/api/setup/status");
+        const setup = await r.json();
+        if (!r.ok)
+            throw new Error(setup.detail || `HTTP ${r.status}`);
+        setupPanel.classList.toggle("ready", setup.local_ready);
+        const local = setup.local_ready ? "Local GGUF ready" : "Local GGUF needs llama-server";
+        setupPanel.innerHTML = [
+            `<strong>Setup:</strong> ${setup.os} ${setup.arch} - Python ${setup.python_version}`,
+            `App process: pid ${setup.app_pid}`,
+            `Cloud ready - ${local}`,
+            setup.next_step,
+        ].join("<br>");
+        clientLog("info", "setup.status.loaded", "", {
+            os: setup.os,
+            arch: setup.arch,
+            local_ready: setup.local_ready,
+            venv_exists: setup.venv_exists,
+            deps_ready: setup.deps_ready,
+        });
+    }
+    catch (e) {
+        const msg = e instanceof Error ? e.message : String(e);
+        setupPanel.classList.remove("ready");
+        setupPanel.textContent = `Setup check failed: ${msg}`;
+        clientLog("warn", "setup.status.failed", msg);
     }
 }
 function addLog(text, cls = "") {
@@ -459,8 +493,11 @@ startBtn.addEventListener("click", async () => {
         }
     }
     catch (e) {
+        const msg = backendUnreachableMessage(e);
         clientLog("error", "launcher.start.request_failed", stringifyLogArg(e));
-        addLog("Request failed: " + e, "log-error");
+        addLog(msg, "log-error");
+        setupPanel.classList.remove("ready");
+        setupPanel.textContent = msg;
         startBtn.disabled = false;
     }
 });
@@ -527,11 +564,7 @@ const profileCopyDetectBtn = $("profileCopyDetect");
 const profileDetectPanel = $("profileDetectPanel");
 function loadProfile() {
     const raw = localStorage.getItem(PROFILE_KEY);
-    const def = {
-        shell: "powershell", os: "Windows",
-        python_version: "", package_manager: "uv",
-        naming_convention: "", custom_rules: "", detected_summary: "",
-    };
+    const def = inferDefaultProfile();
     if (!raw)
         return def;
     try {
@@ -540,6 +573,25 @@ function loadProfile() {
     catch {
         return def;
     }
+}
+function inferDefaultProfile() {
+    const platform = (navigator.platform || "").toLowerCase();
+    const userAgent = navigator.userAgent.toLowerCase();
+    let shell = "powershell";
+    let os = "Windows";
+    if (platform.includes("mac") || userAgent.includes("mac os x")) {
+        shell = "zsh";
+        os = "macOS";
+    }
+    else if (platform.includes("linux") || userAgent.includes("linux")) {
+        shell = "bash";
+        os = "Linux";
+    }
+    return {
+        shell, os,
+        python_version: "", package_manager: "uv",
+        naming_convention: "", custom_rules: "", detected_summary: "",
+    };
 }
 function stripDetectedToolsBlock(rules) {
     const lines = rules.split("\n");
@@ -1901,6 +1953,7 @@ newChatBtn.addEventListener("click", () => {
 clientLog("info", "frontend.init.start");
 loadLauncherSettings();
 loadConfigFallback();
+loadSetupStatus();
 syncPatcherBlock();
 hydrateProfileForm();
 loadHistory();

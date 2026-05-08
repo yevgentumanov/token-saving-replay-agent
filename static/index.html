@@ -138,6 +138,23 @@
     }
     .patcher-toggle input { width: 15px; height: 15px; cursor: pointer; accent-color: #61dafb; }
 
+    .setup-panel {
+      background: #101820;
+      border: 1px solid #2b4658;
+      border-radius: 6px;
+      color: #c7d7e0;
+      font-size: 12px;
+      line-height: 1.45;
+      margin: -4px 0 16px;
+      padding: 10px 12px;
+    }
+    .setup-panel strong { color: #e5f3ff; }
+    .setup-panel.ready {
+      background: #102016;
+      border-color: #28593b;
+      color: #ccebd5;
+    }
+
     .btn {
       padding: 8px 14px;
       border: none; border-radius: 6px;
@@ -842,9 +859,9 @@
 
     <div class="shared-row">
       <div class="field" style="margin:0">
-        <label>Bundled llama-server</label>
+        <label>llama-server binary</label>
         <div class="row">
-          <input type="text" id="llamaPath" placeholder="Using bundled bin\llama-server.exe">
+          <input type="text" id="llamaPath" placeholder="Auto-detect bin/llama-server or PATH">
           <button class="btn btn-browse" id="browseBin">Change...</button>
         </div>
       </div>
@@ -853,6 +870,8 @@
         <input type="text" id="host" value="0.0.0.0" style="width:130px">
       </div>
     </div>
+
+    <div class="setup-panel" id="setupPanel">Checking setup...</div>
 
     <div class="actions">
       <button class="btn" id="startBtn">Start</button>

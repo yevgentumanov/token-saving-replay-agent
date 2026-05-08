@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, Mock, patch, MagicMock
 from fastapi.testclient import TestClient
 
 import consolidation
+import bootstrap
 import main
 from consolidation import PatchRecord
 from llm_clients import BaseLLMClient
@@ -74,7 +75,7 @@ class BackendAlphaTests(unittest.TestCase):
 
     def test_core_endpoints_respond_without_models(self):
         client = TestClient(main.app)
-        for path in ["/api/status", "/api/config", "/api/consolidation/config", "/api/diagnostics", "/api/environment/detect"]:
+        for path in ["/api/status", "/api/config", "/api/setup/status", "/api/consolidation/config", "/api/diagnostics", "/api/environment/detect"]:
             with self.subTest(path=path):
                 response = client.get(path)
                 self.assertEqual(response.status_code, 200)
@@ -109,6 +110,55 @@ class BackendAlphaTests(unittest.TestCase):
         self.assertEqual(main._normalize_os_name("Windows"), "Windows")
         self.assertEqual(main._normalize_os_name("Linux"), "Linux")
         self.assertEqual(main._normalize_os_name("Darwin"), "macOS")
+
+    def test_setup_status_is_issue_safe_and_cloud_ready(self):
+        response = TestClient(main.app).get("/api/setup/status")
+        payload = response.json()
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(payload["cloud_ready"])
+        self.assertIsInstance(payload["app_pid"], int)
+        self.assertIn("local_ready", payload)
+        self.assertIn("next_step", payload)
+        self.assertNotIn("api_key", response.text.lower())
+
+    def test_config_endpoint_clears_stale_llama_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_config = main.CONFIG_FILE
+            try:
+                cfg_path = Path(tmp) / "config.json"
+                cfg_path.write_text(
+                    '{"llama_server_path": "C:/Users/Euu/Desktop/Projects/token-saving-replay-agent/bin/llama-server.exe"}',
+                    encoding="utf-8",
+                )
+                main.CONFIG_FILE = cfg_path
+                with patch("main.find_llama_server", return_value="llama-server"):
+                    response = TestClient(main.app).get("/api/config")
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(response.json()["llama_server_path"], "")
+            finally:
+                main.CONFIG_FILE = original_config
+
+    def test_shell_guess_defaults_to_zsh_on_macos(self):
+        with patch.dict("main.os.environ", {}, clear=True), patch("main.platform.system", return_value="Darwin"):
+            self.assertEqual(main._guess_shell(), "zsh")
+
+    def test_binary_filetypes_are_platform_specific(self):
+        self.assertEqual(main._binary_filetypes("Windows")[0], ("Executables", "*.exe"))
+        self.assertEqual(main._binary_filetypes("Darwin")[0], ("llama-server binaries", "llama-server"))
+        self.assertNotIn("*.exe", [pattern for _, pattern in main._binary_filetypes("Darwin")])
+
+    def test_resolve_llama_server_ignores_stale_windows_path(self):
+        stale = "C:/Users/Euu/Desktop/Projects/token-saving-replay-agent/bin/llama-server.exe"
+        with patch("main.find_llama_server", return_value="llama-server"):
+            self.assertEqual(main.resolve_llama_server_path(stale), "")
+
+    def test_resolve_llama_server_prefers_existing_candidate(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            candidate = Path(tmp) / "llama-server"
+            candidate.write_text("fake", encoding="utf-8")
+            with patch("main.find_llama_server", return_value=""):
+                self.assertEqual(main.resolve_llama_server_path(str(candidate)), str(candidate))
 
 
 class ConsolidationAlphaTests(unittest.TestCase):
@@ -179,6 +229,55 @@ class StaticAlphaTests(unittest.TestCase):
         self.assertTrue(Path("static/vendor/marked.min.js").exists())
         self.assertTrue(Path("static/vendor/purify.min.js").exists())
 
+    def test_macos_launchers_exist(self):
+        self.assertTrue(Path("start.sh").exists())
+        self.assertTrue(Path("start.command").exists())
+        self.assertTrue(Path("Token Saving Replay Agent.app/Contents/Info.plist").exists())
+        self.assertTrue(Path("Token Saving Replay Agent.app/Contents/MacOS/launcher").exists())
+        self.assertIn("bootstrap.py", Path("start.sh").read_text(encoding="utf-8"))
+        self.assertIn("exec ./start.sh", Path("start.command").read_text(encoding="utf-8"))
+        self.assertIn("CFBundleExecutable", Path("Token Saving Replay Agent.app/Contents/Info.plist").read_text(encoding="utf-8"))
+
+
+class BootstrapTests(unittest.TestCase):
+    def test_requirements_hash_is_stable_length(self):
+        self.assertEqual(len(bootstrap.requirements_hash()), 16)
+
+    def test_venv_python_is_platform_specific(self):
+        with patch("bootstrap.platform.system", return_value="Windows"):
+            self.assertEqual(bootstrap.venv_python().name, "python.exe")
+        with patch("bootstrap.platform.system", return_value="Darwin"):
+            self.assertEqual(bootstrap.venv_python().name, "python")
+
+    def test_find_llama_server_prefers_bundled_binary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            original_bin_dir = bootstrap.BIN_DIR
+            try:
+                bootstrap.BIN_DIR = Path(tmp)
+                bundled = Path(tmp) / "llama-server"
+                bundled.write_text("fake", encoding="utf-8")
+                with patch("bootstrap.platform.system", return_value="Darwin"), patch("bootstrap.shutil.which", return_value="/usr/bin/llama-server"):
+                    self.assertEqual(bootstrap.find_llama_server(), str(bundled))
+            finally:
+                bootstrap.BIN_DIR = original_bin_dir
+
+    def test_guard_app_port_reuses_existing_app(self):
+        with patch("bootstrap.existing_app_status", return_value={"a": {"running": True}, "b": {"running": False}}), patch("bootstrap.open_app_url") as mock_open:
+            self.assertFalse(bootstrap.guard_app_port())
+            mock_open.assert_called_once()
+
+    def test_guard_app_port_blocks_foreign_listener(self):
+        with (
+            patch("bootstrap.existing_app_status", return_value=None),
+            patch("bootstrap.port_accepts", return_value=True),
+            patch("bootstrap.describe_port_owner", return_value="foreign process"),
+        ):
+            self.assertFalse(bootstrap.guard_app_port())
+
+    def test_guard_app_port_allows_free_port(self):
+        with patch("bootstrap.existing_app_status", return_value=None), patch("bootstrap.port_accepts", return_value=False):
+            self.assertTrue(bootstrap.guard_app_port())
+
 
 class MockLLMClient(BaseLLMClient):
     """Mock LLM client for smoke testing without real models."""
@@ -220,6 +319,7 @@ class SmokeTests(unittest.TestCase):
         endpoints = [
             "/api/status",
             "/api/config",
+            "/api/setup/status",
             "/api/diagnostics",
             "/api/environment/detect",
             "/api/consolidation/config",
