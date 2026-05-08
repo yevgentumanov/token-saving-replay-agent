@@ -863,6 +863,14 @@ async def api_open_file_dialog(type: str = "model"):
     try:
         import tkinter as tk
         from tkinter import filedialog
+    except ModuleNotFoundError as e:
+        if e.name != "tkinter":
+            raise
+        message = "File picker is unavailable because this Python runtime has no tkinter. Paste the file path manually."
+        log_warning(logger, "api.file_dialog.tkinter_missing", type=type)
+        raise HTTPException(501, message)
+
+    try:
         root = tk.Tk()
         root.withdraw()
         root.attributes("-topmost", True)

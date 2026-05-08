@@ -434,11 +434,13 @@ async function browseFile(type: string, target: HTMLInputElement, logMsg: string
     clientLog("info", "launcher.file_dialog.start", "", { type });
     const r = await fetch(`/api/open-file-dialog?type=${type}`);
     const data = await r.json();
+    if (!r.ok) throw new Error(data.detail || `HTTP ${r.status}`);
     if (data.path) { target.value = data.path; saveLauncherSettings(); addLog(logMsg + data.path, "log-info"); }
     clientLog("info", "launcher.file_dialog.done", "", { type, selected: Boolean(data.path) });
   } catch (e) {
-    clientLog("error", "launcher.file_dialog.failed", stringifyLogArg(e), { type });
-    addLog("File dialog failed: " + e, "log-error");
+    const msg = e instanceof Error ? e.message : String(e);
+    clientLog("error", "launcher.file_dialog.failed", msg, { type });
+    addLog("File dialog unavailable: " + msg, "log-error");
   }
 }
 $("browseA").addEventListener("click",   () => browseFile("model",  pathA,    "Model A: "));
