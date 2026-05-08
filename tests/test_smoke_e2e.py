@@ -130,7 +130,7 @@ class PortableLauncherSmokeTests(unittest.TestCase):
         ).hexdigest()[:16]
 
         deps_marker = self.tmp_path / ".deps_installed"
-        deps_marker.write_text(req_hash)
+        deps_marker.write_text(f"isolated-user-site-v1:{req_hash}")
 
         with (
             patch.object(portable_launcher, "DEPS_MARKER", deps_marker),

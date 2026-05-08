@@ -1,0 +1,17 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+APP_DIR="$(cd "$(dirname "$0")/../../.." && pwd)"
+cd "$APP_DIR"
+
+LOG_DIR="$APP_DIR/.replay/logs"
+mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/macos-app-launcher.log"
+
+{
+  echo "[$(date)] Launching Token Saving Replay Agent.app"
+  echo "App dir: $APP_DIR"
+} >> "$LOG_FILE"
+
+osascript -e 'tell application "Terminal" to activate' \
+  -e "tell application \"Terminal\" to do script \"cd $(printf '%q' "$APP_DIR") && ./start.sh; exit\"" >> "$LOG_FILE" 2>&1

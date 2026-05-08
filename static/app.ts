@@ -40,12 +40,32 @@ function messageText(m: ChatMessage): string {
   return m.content.filter(p => p.type === "text").map(p => (p as TextPart).text).join("\n");
 }
 
+function backendUnreachableMessage(e: unknown): string {
+  const detail = e instanceof Error ? e.message : String(e);
+  return `Backend server is not reachable (${detail}). Relaunch Token Saving Replay Agent.app or run ./start.sh, then reload this page.`;
+}
+
 interface ToolDetection { found: boolean; version: string; }
 interface EnvironmentDetection {
   app_version: string;
   os: { name: string; platform: string; release: string; distro: string };
   shell: { guess: string };
   tools: Record<string, ToolDetection>;
+}
+
+interface SetupStatus {
+  app_version: string;
+  os: string;
+  arch: string;
+  python_version: string;
+  app_pid: number;
+  venv_exists: boolean;
+  deps_ready: boolean;
+  cloud_ready: boolean;
+  local_ready: boolean;
+  llama_server_found: boolean;
+  llama_server_source: string;
+  next_step: string;
 }
 
 // Phase 2.5 - Consolidation Pass types
@@ -121,6 +141,7 @@ const consoleDiv = $<HTMLDivElement>("console");
 const diagnosticsBtn     = $<HTMLButtonElement>("diagnosticsBtn");
 const copyDiagnosticsBtn = $<HTMLButtonElement>("copyDiagnosticsBtn");
 const diagnosticsPanel   = $<HTMLPreElement>("diagnosticsPanel");
+const setupPanel         = $<HTMLDivElement>("setupPanel");
 
 // Cloud / provider elements - Model A
 const providerA         = $<HTMLSelectElement>("providerA");
@@ -209,8 +230,8 @@ async function loadConfigFallback(): Promise<void> {
     if (c.model_a_port)      portA.value     = String(c.model_a_port);
     if (c.model_b_path)      pathB.value     = c.model_b_path;
     if (c.model_b_port)      portB.value     = String(c.model_b_port);
-    if (c.llama_server_path) {
-      llamaPath.value = c.llama_server_path;
+    if ("llama_server_path" in c) {
+      llamaPath.value = c.llama_server_path || "";
       localStorage.setItem("llamaPath", c.llama_server_path);
     }
     if (c.host)              hostInput.value = c.host;
@@ -226,6 +247,34 @@ async function loadConfigFallback(): Promise<void> {
     clientLog("info", "launcher.config.load.done", "", { has_model_a: Boolean(c.model_a_path), has_model_b: Boolean(c.model_b_path) });
   } catch (e) {
     clientLog("warn", "launcher.config.load.failed", stringifyLogArg(e));
+  }
+}
+
+async function loadSetupStatus(): Promise<void> {
+  try {
+    const r = await fetch("/api/setup/status");
+    const setup: SetupStatus = await r.json();
+    if (!r.ok) throw new Error((setup as any).detail || `HTTP ${r.status}`);
+    setupPanel.classList.toggle("ready", setup.local_ready);
+    const local = setup.local_ready ? "Local GGUF ready" : "Local GGUF needs llama-server";
+    setupPanel.innerHTML = [
+      `<strong>Setup:</strong> ${setup.os} ${setup.arch} - Python ${setup.python_version}`,
+      `App process: pid ${setup.app_pid}`,
+      `Cloud ready - ${local}`,
+      setup.next_step,
+    ].join("<br>");
+    clientLog("info", "setup.status.loaded", "", {
+      os: setup.os,
+      arch: setup.arch,
+      local_ready: setup.local_ready,
+      venv_exists: setup.venv_exists,
+      deps_ready: setup.deps_ready,
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    setupPanel.classList.remove("ready");
+    setupPanel.textContent = `Setup check failed: ${msg}`;
+    clientLog("warn", "setup.status.failed", msg);
   }
 }
 
@@ -523,8 +572,12 @@ startBtn.addEventListener("click", async () => {
       connectWs();
     }
   } catch (e) {
+    const msg = backendUnreachableMessage(e);
     clientLog("error", "launcher.start.request_failed", stringifyLogArg(e));
-    addLog("Request failed: " + e, "log-error"); startBtn.disabled = false;
+    addLog(msg, "log-error");
+    setupPanel.classList.remove("ready");
+    setupPanel.textContent = msg;
+    startBtn.disabled = false;
   }
 });
 
@@ -592,13 +645,28 @@ const profileDetectPanel = $<HTMLPreElement>("profileDetectPanel");
 
 function loadProfile(): EnvProfile {
   const raw = localStorage.getItem(PROFILE_KEY);
-  const def: EnvProfile = {
-    shell: "powershell", os: "Windows",
+  const def = inferDefaultProfile();
+  if (!raw) return def;
+  try { return { ...def, ...JSON.parse(raw) }; } catch { return def; }
+}
+
+function inferDefaultProfile(): EnvProfile {
+  const platform = (navigator.platform || "").toLowerCase();
+  const userAgent = navigator.userAgent.toLowerCase();
+  let shell = "powershell";
+  let os = "Windows";
+  if (platform.includes("mac") || userAgent.includes("mac os x")) {
+    shell = "zsh";
+    os = "macOS";
+  } else if (platform.includes("linux") || userAgent.includes("linux")) {
+    shell = "bash";
+    os = "Linux";
+  }
+  return {
+    shell, os,
     python_version: "", package_manager: "uv",
     naming_convention: "", custom_rules: "", detected_summary: "",
   };
-  if (!raw) return def;
-  try { return { ...def, ...JSON.parse(raw) }; } catch { return def; }
 }
 
 function stripDetectedToolsBlock(rules: string): string {
@@ -1972,6 +2040,7 @@ newChatBtn.addEventListener("click", () => {
 clientLog("info", "frontend.init.start");
 loadLauncherSettings();
 loadConfigFallback();
+loadSetupStatus();
 syncPatcherBlock();
 hydrateProfileForm();
 loadHistory();

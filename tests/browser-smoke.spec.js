@@ -8,6 +8,7 @@ test("browser alpha launcher and diagnostics smoke", async ({ page }) => {
   await expect(page.getByRole("button", { name: "Launcher" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Chat" })).toBeVisible();
   await expect(page.getByRole("button", { name: "Profile" })).toBeVisible();
+  await expect(page.locator("#setupPanel")).toContainText("Cloud ready");
 
   await page.getByRole("button", { name: "Diagnostics" }).click();
   const diagnostics = page.locator("#diagnosticsPanel");
@@ -74,4 +75,16 @@ test("profile auto-detect can be previewed and applied", async ({ page }) => {
   const savedProfile = await page.evaluate(() => JSON.parse(localStorage.getItem("envProfile") || "{}"));
   expect(savedProfile.detected_summary).toContain("Node: 22.1.0");
   expect(savedProfile.detected_summary).toContain("Java: not found");
+});
+
+test("fresh macOS browser profile defaults to zsh", async ({ page }) => {
+  await page.addInitScript(() => {
+    Object.defineProperty(navigator, "platform", { get: () => "MacIntel" });
+  });
+
+  await page.goto("http://127.0.0.1:7860/");
+  await page.getByRole("button", { name: "Profile" }).click();
+
+  await expect(page.locator("#prof-os")).toHaveValue("macOS");
+  await expect(page.locator("#prof-shell")).toHaveValue("zsh");
 });

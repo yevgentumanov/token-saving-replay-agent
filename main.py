@@ -44,6 +44,7 @@ from app_logging import (
     setup_logging,
 )
 import consolidation
+import bootstrap
 from consolidation import PatchRecord, run_consolidation_pass
 import keeper
 from keeper import KeeperSession, run_keeper_review, keeper_session_init
@@ -107,6 +108,20 @@ def find_llama_server() -> str:
     return "llama-server.exe" if platform.system() == "Windows" else "llama-server"
 
 
+def _existing_path(value: str) -> str:
+    cleaned = (value or "").strip()
+    return cleaned if cleaned and Path(cleaned).exists() else ""
+
+
+def resolve_llama_server_path(*candidates: str) -> str:
+    for candidate in candidates:
+        existing = _existing_path(candidate)
+        if existing:
+            return existing
+    detected = find_llama_server()
+    return detected if Path(detected).exists() else ""
+
+
 def _path_exists(value: str) -> bool:
     return bool(value and Path(value).exists())
 
@@ -147,6 +162,12 @@ def _guess_shell() -> str:
     if platform.system() == "Darwin":
         return "zsh"
     return "bash"
+
+
+def _binary_filetypes(system_name: Optional[str] = None) -> list[tuple[str, str]]:
+    if (system_name or platform.system()) == "Windows":
+        return [("Executables", "*.exe"), ("All files", "*.*")]
+    return [("llama-server binaries", "llama-server"), ("All files", "*")]
 
 
 def _version_from_output(output: str, prefix: str = "") -> str:
@@ -396,6 +417,12 @@ async def _health(flag: str, proc_attr: str, port_attr: str, provider_attr: str,
 
 
 def _launch(model_path: str, args: str, host: str, port: int, llama_bin: str):
+    if not llama_bin:
+        raise HTTPException(
+            400,
+            "llama-server binary not found. Cloud providers can run without it; local GGUF models need llama.cpp/llama-server. "
+            "On macOS with Homebrew, run: brew install llama.cpp",
+        )
     cmd = [llama_bin, "--model", model_path, "--host", host, "--port", str(port)]
     if args.strip():
         cmd += shlex.split(args)
@@ -539,7 +566,7 @@ async def api_start(req: StartRequest):
         raise HTTPException(400, "Already running; stop first")
 
     cfg = load_config()
-    llama_bin = req.llama_server_path.strip() or cfg.get("llama_server_path") or find_llama_server()
+    llama_bin = resolve_llama_server_path(req.llama_server_path, cfg.get("llama_server_path", ""))
 
     # Validate model A
     if req.model_a.provider == "local":
@@ -697,10 +724,36 @@ async def api_status():
 @app.get("/api/config")
 async def api_get_config():
     cfg = load_config()
-    if not cfg.get("llama_server_path"):
-        cfg["llama_server_path"] = find_llama_server()
+    cfg["llama_server_path"] = resolve_llama_server_path(cfg.get("llama_server_path", ""))
     log_event(logger, "api.config", llama_server_path=cfg.get("llama_server_path", ""))
     return cfg
+
+
+@app.get("/api/setup/status")
+async def api_setup_status():
+    cfg = load_config()
+    llama_bin = resolve_llama_server_path(cfg.get("llama_server_path", ""))
+    local_ready = _path_exists(llama_bin)
+    result = {
+        "app_version": APP_VERSION,
+        "os": _normalize_os_name(),
+        "arch": platform.machine(),
+        "python_version": platform.python_version(),
+        "app_pid": os.getpid(),
+        "venv_exists": bootstrap.VENV_DIR.exists(),
+        "deps_ready": bootstrap.DEPS_MARKER.exists(),
+        "cloud_ready": True,
+        "local_ready": local_ready,
+        "llama_server_found": local_ready,
+        "llama_server_source": "configured_or_auto" if local_ready else "",
+        "next_step": (
+            "Cloud providers are ready. Local GGUF models are ready too."
+            if local_ready
+            else "Cloud providers are ready. Local GGUF models need llama-server."
+        ),
+    }
+    log_event(logger, "api.setup_status", local_ready=local_ready, os=result["os"], arch=result["arch"])
+    return result
 
 
 @app.get("/api/diagnostics")
@@ -711,12 +764,13 @@ async def api_diagnostics():
     contain credentials.
     """
     cfg = load_config()
-    llama_bin = cfg.get("llama_server_path") or find_llama_server()
+    llama_bin = resolve_llama_server_path(cfg.get("llama_server_path", ""))
     provider_a = state.provider_a if state.client_a or state.alive(state.proc_a) else cfg.get("model_a_provider", "local")
     provider_b = state.provider_b if state.client_b or state.alive(state.proc_b) else cfg.get("model_b_provider", "local")
     result = {
         "app_version": APP_VERSION,
         "python_version": platform.python_version(),
+        "app_pid": os.getpid(),
         "platform": platform.platform(),
         "config_exists": CONFIG_FILE.exists(),
         "llama_server_path_exists": _path_exists(llama_bin),
@@ -813,7 +867,7 @@ async def api_open_file_dialog(type: str = "model"):
         root.withdraw()
         root.attributes("-topmost", True)
         if type == "binary":
-            filetypes = [("Executables", "*.exe"), ("All files", "*.*")]
+            filetypes = _binary_filetypes()
             title = "Select llama-server executable"
         else:
             filetypes = [("GGUF models", "*.gguf"), ("All files", "*.*")]

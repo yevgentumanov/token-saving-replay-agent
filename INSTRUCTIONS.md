@@ -13,6 +13,11 @@ Version `0.1.0-alpha` — browser app at `http://localhost:7860`.
 
 Cloud providers (OpenAI, Anthropic, Groq) work without `llama-server` or GGUF files.
 
+macOS users can double-click `Token Saving Replay Agent.app` from Finder. The
+app opens Terminal and runs the bootstrap launcher. `./start.sh` and
+`start.command` are fallback entry points. Cloud mode is ready even when
+`llama-server` is missing.
+
 Windows users can skip everything above and just run `start.bat` — it handles
 portable Python, GPU detection, and `llama-server` download automatically.
 
@@ -49,7 +54,45 @@ Everything stays local — nothing is installed system-wide.
 
 ---
 
-## 4. Get `llama-server`
+## 4. Install — macOS Launcher (`.app` / `start.sh` / `start.command`)
+
+From Finder, double-click:
+
+```text
+Token Saving Replay Agent.app
+```
+
+From Terminal:
+
+```bash
+./start.sh
+```
+
+If macOS blocks `start.command` because the file is not marked executable, run:
+
+```bash
+chmod +x start.sh start.command
+```
+
+The launcher uses Python 3.10+ to create `.venv`, installs `requirements.txt`,
+records a dependency marker, checks for `llama-server`, and starts `main.py`.
+It does not install Homebrew or model files. Cloud providers work without those
+pieces.
+
+If the app is already running on `http://localhost:7860`, the launcher opens the
+existing app instead of starting another server. If the port is used by a
+different process, the launcher prints the detected port owner and exits.
+
+If Homebrew is already installed and you want the launcher to install
+`llama.cpp`, run:
+
+```bash
+TSRA_AUTO_INSTALL_LLAMA=1 ./start.sh
+```
+
+---
+
+## 5. Get `llama-server`
 
 Only needed for local GGUF models. Skip if using cloud providers only.
 
@@ -58,7 +101,29 @@ Only needed for local GGUF models. Skip if using cloud providers only.
 Download a release archive from llama.cpp and extract `llama-server.exe`.
 The portable launcher handles this automatically.
 
-### Linux / macOS
+### macOS / Apple Silicon
+
+For MacBook local models, build llama.cpp with Metal:
+
+```bash
+brew install cmake git
+git clone https://github.com/ggml-org/llama.cpp
+cd llama.cpp
+cmake -B build -DLLAMA_CURL=ON -DGGML_METAL=ON
+cmake --build build --config Release -j"$(sysctl -n hw.ncpu)"
+# binary at build/bin/llama-server
+```
+
+Then either:
+
+```bash
+mkdir -p /path/to/token-saving-replay-agent/bin
+cp build/bin/llama-server /path/to/token-saving-replay-agent/bin/llama-server
+```
+
+or select `build/bin/llama-server` in the Launcher tab.
+
+### Linux
 
 ```bash
 git clone https://github.com/ggml-org/llama.cpp
@@ -70,9 +135,11 @@ cmake --build build --config Release -j$(nproc)
 
 ---
 
-## 5. Launcher Tab
+## 6. Launcher Tab
 
 After opening the app, go to the **Launcher** tab to configure and start models.
+The setup panel reports whether Cloud mode is ready and whether Local GGUF mode
+has a usable `llama-server`.
 
 ### Model A (required for chat)
 
@@ -99,10 +166,12 @@ Click **Start** to launch both models. Click **Stop** to shut them down.
 Config is saved to `config.json` after each Start.
 
 The health indicator next to each model updates every 4 seconds.
+**Stop All** stops Model A/B processes managed by the app; it does not close the
+browser app server itself.
 
 ---
 
-## 6. Profile Tab
+## 7. Profile Tab
 
 Fill in your local environment once. This is injected as the system prompt on
 every Model A chat turn and used by the patcher to rewrite commands correctly.
@@ -110,7 +179,7 @@ every Model A chat turn and used by the patcher to rewrite commands correctly.
 | Field | Example |
 |---|---|
 | Shell | `powershell`, `bash`, `zsh` |
-| OS | `Windows 11`, `Ubuntu 24.04` |
+| OS | `Windows`, `Linux`, `macOS` |
 | Python version | `3.12.3` |
 | Package manager | `uv`, `pip`, `conda` |
 | Custom rules | Any extra instructions for Model A |
@@ -123,7 +192,7 @@ available tools from the server's environment detection endpoint.
 
 ---
 
-## 7. Chat Tab
+## 8. Chat Tab
 
 ### Sending messages
 
@@ -165,7 +234,7 @@ targeted fix without replaying the whole conversation through Model A.
 
 ---
 
-## 8. API Routes
+## 9. API Routes
 
 All routes are served by the FastAPI backend at `http://localhost:7860`.
 
@@ -175,6 +244,7 @@ All routes are served by the FastAPI backend at `http://localhost:7860`.
 | POST | `/api/stop` | Stop all model processes |
 | GET | `/api/status` | Health of both models (`a`/`b` keys) |
 | GET | `/api/config` | Current config (no API keys) |
+| GET | `/api/setup/status` | Setup readiness for Cloud and Local GGUF mode |
 | GET | `/api/diagnostics` | Safe diagnostics JSON for bug reports |
 | POST | `/api/chat/main` | SSE stream from Model A |
 | POST | `/api/chat/patcher` | One-shot Model B patcher call |
@@ -191,7 +261,7 @@ All routes are served by the FastAPI backend at `http://localhost:7860`.
 
 ---
 
-## 9. Config Files
+## 10. Config Files
 
 - `config.json` — local runtime state, ignored by git. Created on first Start.
 - `config.example.json` — documents the expected shape without secrets.
@@ -219,7 +289,7 @@ Config keys:
 
 ---
 
-## 10. Diagnostics
+## 11. Diagnostics
 
 The **Diagnostics** button in the Launcher tab returns safe JSON for filing bug reports:
 
@@ -231,7 +301,7 @@ It does not include API keys, prompts, chat history, or raw model paths.
 
 ---
 
-## 11. Logs
+## 12. Logs
 
 Logs are written to `.replay/logs/` (not committed to git):
 
@@ -250,7 +320,7 @@ Recent log lines are also accessible via `GET /api/logs/recent?lines=80`.
 
 ---
 
-## 12. Concept Keeper
+## 13. Concept Keeper
 
 `keeper.py` implements a guardian that reviews proposed architectural changes
 against `.replay/CONCEPT.md` — the project's immutable design manifesto.
@@ -280,7 +350,7 @@ The Keeper runs inside the same FastAPI process and uses Model B as its LLM.
 
 ---
 
-## 13. Troubleshooting
+## 14. Troubleshooting
 
 ### Model A is not running
 
@@ -330,7 +400,7 @@ tokens and get faster responses from Qwen3 and similar models.
 
 ---
 
-## 14. Development
+## 15. Development
 
 ### Recompile TypeScript
 

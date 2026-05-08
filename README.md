@@ -36,6 +36,41 @@ Open `http://localhost:7860`, then configure the Launcher tab:
 - Optional Model B path or cloud provider
 - Host and ports
 
+### macOS quick start
+
+Mac users can double-click `Token Saving Replay Agent.app` from Finder. It opens
+Terminal and runs the bootstrap launcher for you.
+
+If you prefer Terminal:
+
+```bash
+./start.sh
+```
+
+`start.command` is kept as a fallback for users who prefer a command file. The
+launcher creates `.venv`, installs Python dependencies, checks the setup, and
+starts the browser app. Cloud providers work right away without `llama-server`.
+Local GGUF models use `bin/llama-server` or a `llama-server` found on `PATH`; if
+neither exists, the Launcher tab still opens and shows the next setup step.
+If the app is already running, the launcher opens the existing browser app
+instead of starting a second server.
+
+For local GGUF models on Apple Silicon, build `llama.cpp` with Metal:
+
+```bash
+brew install cmake git
+git clone https://github.com/ggml-org/llama.cpp
+cd llama.cpp
+cmake -B build -DLLAMA_CURL=ON -DGGML_METAL=ON
+cmake --build build --config Release -j"$(sysctl -n hw.ncpu)"
+```
+
+Then either copy `build/bin/llama-server` to this repo's `bin/llama-server`, or
+select that binary in the Launcher tab.
+
+If Homebrew is already installed, `TSRA_AUTO_INSTALL_LLAMA=1 ./start.sh` can
+install `llama.cpp` for you before starting the app.
+
 ### Windows zero-install path
 
 Windows users can run:
@@ -122,11 +157,13 @@ Browser http://localhost:7860
 Core files:
 
 - `main.py` - FastAPI backend, process management, API routes
+- `bootstrap.py` - macOS/Linux repo bootstrap and setup checks
 - `llm_clients.py` - local/cloud LLM abstraction
 - `consolidation.py` - patch summary pass
 - `keeper.py` - concept guardian; reviews proposed architectural changes against `CONCEPT.md`
 - `app_logging.py` - rotating file logger writing to `.replay/logs/`
 - `static/index.html` and `static/app.ts` - browser UI
+- `start.sh` and `start.command` - macOS/Linux local launcher
 - `portable_launcher.py` and `start.bat` - Windows portable launcher
 
 ## Development
